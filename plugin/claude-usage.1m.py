@@ -7,11 +7,15 @@
 #
 # Accounts are found automatically:
 #   - keychain logins: every "Claude Code-credentials*" item (plain `claude`
-#     and any CLAUDE_CONFIG_DIR variant); usage comes from /api/oauth/usage.
+#     and any CLAUDE_CONFIG_DIR variant).
 #   - setup-tokens: any line in shell rc files or ~/bin, ~/.local/bin scripts
 #     that sets CLAUDE_CODE_OAUTH_TOKEN to a literal token or to $(cat FILE).
-#     These tokens lack the user:profile scope, so usage is read from the
-#     rate-limit headers of a 1-token Haiku request, at most every TOKEN_EVERY s.
+# Usage is read from the rate-limit headers of a 1-token request, every
+# PROBE_EVERY s. /api/oauth/usage is not used: setup-tokens lack the scope for
+# it and it returns 429 for long stretches when polled. A Fable request also
+# returns the per-model weekly windows (e.g. 7d_oi), which a Haiku one omits.
+# Once every UPDATE_EVERY s the latest GitHub release is checked; the menu then
+# offers a one-click update that replaces this file (`--update`).
 # Optional ~/.config/claude-usage.conf, one entry per line:
 #   label = /path/to/token-file     add a token the scan cannot find
 #   keychain = off                  hide keychain logins
@@ -27,6 +31,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
+VERSION = "1.1.0"
+REPO = "Kong-Travis/claude-usage-bar"
+PLUGIN_PATH_IN_REPO = "plugin/claude-usage.1m.py"
 API = "https://api.anthropic.com"
 HOME = os.path.expanduser("~")
 CACHE_DIR = os.path.join(HOME, ".cache", "claude-usage")
@@ -36,7 +43,12 @@ SCRIPT_DIRS = ["bin", ".local/bin"]
 SECURITY = "/usr/bin/security"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 WARN, CRIT = 70, 90
-TOKEN_EVERY = 300  # token probes cost a little quota, so poll them less often
+PROBE_EVERY = 180      # each probe costs a few tokens of quota
+PROBE_MODELS = ["claude-fable-5-1", "claude-haiku-5-5"]  # fall back if Fable is unavailable
+# Per-model weekly windows seen in the headers, by suffix of "7d_<suffix>".
+MODEL_WINDOWS = {"oi": "Fable"}
+EMAIL_EVERY = 86400
+UPDATE_EVERY = 6 * 3600
 MAX_IN_TITLE = 3
 
 TOKEN_RE = re.compile(r"sk-ant-oat\d+-[A-Za-z0-9_-]+")
@@ -168,6 +180,35 @@ def accounts():
     return result
 
 
+# ---------- cache ----------
+
+def cache_path(name):
+    return os.path.join(CACHE_DIR, name + ".json")
+
+
+def load(name):
+    try:
+        with open(cache_path(name)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save(name, data):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp = cache_path(name) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, cache_path(name))
+
+
+def age(name):
+    try:
+        return time.time() - os.path.getmtime(cache_path(name))
+    except OSError:
+        return float("inf")
+
+
 # ---------- usage ----------
 
 def oauth_get(path, token):
@@ -183,50 +224,66 @@ def iso_to_epoch(s):
     return int(datetime.fromisoformat(s).timestamp())
 
 
-def usage_keychain(acc):
-    token = keychain_token(acc["service"])
-    d = oauth_get("/api/oauth/usage", token)
-    data = {
-        "5h": d["five_hour"]["utilization"],
-        "5h_reset": iso_to_epoch(d["five_hour"]["resets_at"]),
-        "7d": d["seven_day"]["utilization"],
-        "7d_reset": iso_to_epoch(d["seven_day"]["resets_at"]),
-    }
-    try:
-        data["email"] = oauth_get("/api/oauth/profile", token)["account"]["email"]
-    except Exception:
-        pass
-    return data
-
-
-def usage_token(acc):
-    body = json.dumps({
-        "model": "claude-haiku-5-5",
-        "max_tokens": 1,
-        "system": "You are Claude Code, Anthropic's official CLI for Claude.",
-        "messages": [{"role": "user", "content": "hi"}],
-    }).encode()
-    req = urllib.request.Request(API + "/v1/messages", data=body, headers={
-        "Authorization": "Bearer " + acc["token"],
-        "anthropic-beta": "oauth-2025-04-20",
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            h = r.headers
-    except urllib.error.HTTPError as e:
-        # A rate-limited account still returns the usage headers.
-        h = e.headers
+def usage_probe(token):
+    """Read usage from the rate-limit headers of a 1-token request."""
     p = "anthropic-ratelimit-unified-"
-    if h.get(p + "5h-utilization") is None:
+    for model in PROBE_MODELS:
+        body = json.dumps({
+            "model": model,
+            "max_tokens": 1,
+            "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+            "messages": [{"role": "user", "content": "hi"}],
+        }).encode()
+        req = urllib.request.Request(API + "/v1/messages", data=body, headers={
+            "Authorization": "Bearer " + token,
+            "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                h = r.headers
+        except urllib.error.HTTPError as e:
+            # A rate-limited account still returns the usage headers.
+            h = e.headers
+        if h.get(p + "5h-utilization") is not None:
+            break
+    else:
         raise RuntimeError("no rate-limit headers")
-    return {
+    data = {
         "5h": float(h[p + "5h-utilization"]) * 100,
         "5h_reset": int(h[p + "5h-reset"]),
         "7d": float(h[p + "7d-utilization"]) * 100,
         "7d_reset": int(h[p + "7d-reset"]),
+        "models": [],
     }
+    for name in h.keys():
+        m = re.match(re.escape(p) + r"7d_(\w+)-utilization$", name.lower())
+        if m:
+            suffix = m.group(1)
+            data["models"].append({
+                "name": MODEL_WINDOWS.get(suffix, suffix),
+                "pct": float(h[name]) * 100,
+                "reset": int(h.get(p + "7d_" + suffix + "-reset") or 0),
+            })
+    return data
+
+
+def keychain_email(acc, key):
+    name = key + "-email"
+    cached_email = load(name)
+    if age(name) < EMAIL_EVERY and cached_email:
+        return cached_email.get("email", "")
+    try:
+        email = oauth_get("/api/oauth/profile", keychain_token(acc["service"]))["account"]["email"]
+        save(name, {"email": email})
+        return email
+    except Exception:
+        return (cached_email or {}).get("email", "")
+
+
+def account_token(acc):
+    return keychain_token(acc["service"]) if acc["kind"] == "keychain" else acc["token"]
 
 
 def cache_key(acc):
@@ -234,31 +291,17 @@ def cache_key(acc):
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def load(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
-
-
-def cached(acc):
+def cached(acc, force=False):
     """Return (data, error). On failure fall back to the last good result."""
-    path = os.path.join(CACHE_DIR, cache_key(acc) + ".json")
-    if acc["kind"] == "token":
-        try:
-            if time.time() - os.path.getmtime(path) < TOKEN_EVERY:
-                return load(path), None
-        except OSError:
-            pass
+    key = cache_key(acc)
+    if not force and age(key) < PROBE_EVERY and load(key):
+        return load(key), None
     try:
-        data = usage_keychain(acc) if acc["kind"] == "keychain" else usage_token(acc)
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(data, f)
+        data = usage_probe(account_token(acc))
+        save(key, data)
         return data, None
     except Exception as e:
-        return load(path), "%s: %s" % (type(e).__name__, str(e)[:160])
+        return load(key), "%s: %s" % (type(e).__name__, str(e)[:160])
 
 
 def log_errors(rows):
@@ -266,11 +309,53 @@ def log_errors(rows):
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         with open(os.path.join(CACHE_DIR, "last-run.log"), "w") as f:
-            f.write("%s python=%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), sys.executable))
+            f.write("%s v%s python=%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), VERSION, sys.executable))
             for s, acc, _, err in rows:
                 f.write("%s %s: %s\n" % (s, acc["label"], err or "ok"))
     except OSError:
         pass
+
+
+# ---------- updates ----------
+
+def parse_version(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+
+def latest_release():
+    """Return the newest release tag, checking GitHub at most every UPDATE_EVERY s."""
+    cached_rel = load("update")
+    if age("update") < UPDATE_EVERY and cached_rel:
+        return cached_rel.get("tag")
+    try:
+        req = urllib.request.Request("https://api.github.com/repos/%s/releases/latest" % REPO,
+                                     headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            tag = json.load(r)["tag_name"]
+        save("update", {"tag": tag})
+        return tag
+    except Exception:
+        return (cached_rel or {}).get("tag")
+
+
+def self_update():
+    """Replace this file with the plugin from the latest release, after sanity checks."""
+    tag = latest_release()
+    if not tag or parse_version(tag) <= parse_version(VERSION):
+        return
+    url = "https://raw.githubusercontent.com/%s/%s/%s" % (REPO, tag, PLUGIN_PATH_IN_REPO)
+    with urllib.request.urlopen(url, timeout=30) as r:
+        code = r.read().decode()
+    want = 'VERSION = "%s"' % ".".join(str(n) for n in parse_version(tag))
+    if not code.startswith("#!/usr/bin/python3") or want not in code:
+        raise RuntimeError("downloaded plugin failed sanity check")
+    compile(code, "plugin", "exec")
+    me = os.path.realpath(__file__)
+    tmp = me + ".new"
+    with open(tmp, "w") as f:
+        f.write(code)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, me)
 
 
 # ---------- output ----------
@@ -294,11 +379,34 @@ def fmt_reset(epoch):
     return time.strftime("%H:%M %d/%m", time.localtime(epoch))
 
 
+def print_update_items(tag):
+    if not tag or parse_version(tag) <= parse_version(VERSION):
+        return
+    me = os.path.realpath(__file__)
+    print("Có bản mới %s (đang dùng v%s) | color=#2e7d32" % (tag, VERSION))
+    print('Cập nhật ngay | bash="%s" param1=--update terminal=false refresh=true' % me)
+    print("Xem thay đổi | href=https://github.com/%s/releases/tag/%s" % (REPO, tag))
+    print("---")
+
+
 def main():
+    if sys.argv[1:] == ["--update"]:
+        self_update()
+        return
+    if sys.argv[1:] == ["--force"]:
+        for acc in accounts():
+            cached(acc, force=True)
+        return
+
     accs = accounts()
+    tag = latest_release()
+    has_update = bool(tag) and parse_version(tag) > parse_version(VERSION)
+    badge = " sfimage=arrow.down.circle" if has_update else ""
+
     if not accs:
-        print("Claude ?")
+        print("Claude ? |" + badge)
         print("---")
+        print_update_items(tag)
         print("Không tìm thấy tài khoản Claude Code nào")
         print("Đăng nhập bằng `claude`, hoặc khai báo token trong ~/.config/claude-usage.conf | size=11")
         return
@@ -307,10 +415,9 @@ def main():
     for acc in accs:
         data, err = cached(acc)
         if acc["kind"] == "keychain":
-            email = (data or {}).get("email", "")
             default = acc["service"] == KEYCHAIN_SERVICE
             acc["label"] = "claude" if default else "claude (" + acc["service"][len(KEYCHAIN_SERVICE):].strip("-") + ")"
-            acc["detail"] = email
+            acc["detail"] = keychain_email(acc, cache_key(acc))
         else:
             acc["detail"] = "token"
         rows.append((short_name(acc["label"], taken), acc, data, err))
@@ -324,8 +431,9 @@ def main():
     else:
         title = "Claude %d%%" % round(worst)
     c = color(worst)
-    print(title + (" | color=" + c if c else ""))
+    print(title + " |" + (" color=" + c if c else "") + badge)
     print("---")
+    print_update_items(tag)
 
     for s, acc, d, err in rows:
         head = "%s: %s" % (s, acc["label"])
@@ -339,14 +447,22 @@ def main():
                 line = "%s: %d%%  (reset %s)" % (name, round(d[key]), fmt_reset(d[key + "_reset"]))
                 c = color(d[key])
                 print(line + (" | color=" + c if c else ""))
+            for m in d.get("models", []):
+                line = "%s (tuần): %d%%" % (m["name"], round(m["pct"]))
+                if m["reset"]:
+                    line += "  (reset %s)" % fmt_reset(m["reset"])
+                c = color(m["pct"])
+                print(line + (" | color=" + c if c else ""))
             if err:
                 print("Số liệu cũ, lần cập nhật vừa rồi bị lỗi | color=gray size=11")
         if err:
             print("Lỗi: %s | color=gray size=11" % err.replace("|", "/"))
         print("---")
-    print("Đăng nhập trình duyệt: cập nhật mỗi 1 phút, token: mỗi 5 phút | color=gray size=11")
+    print("Cập nhật mỗi 3 phút | color=gray size=11")
     print("Số đầu: % giới hạn 5 giờ, số sau: % giới hạn tuần | color=gray size=11")
-    print("Làm mới | refresh=true")
+    print("Phiên bản v%s | color=gray size=11 href=https://github.com/%s" % (VERSION, REPO))
+    me = os.path.realpath(__file__)
+    print('Làm mới ngay | bash="%s" param1=--force terminal=false refresh=true' % me)
 
 
 main()

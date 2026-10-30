@@ -26,8 +26,9 @@ bash "/Volumes/Claude Usage/Cài đặt Claude Usage.command"
 
 - Works with browser logins (`claude`) and `claude setup-token` tokens (aliases using
   `CLAUDE_CODE_OAUTH_TOKEN`). Accounts are found automatically.
-- Browser logins refresh every minute. Token accounts refresh every 5 minutes and use a tiny
-  1-token request each time, because tokens cannot read usage any other way.
+- The menu also shows the Fable weekly limit.
+- Refreshes every 3 minutes (or click "Làm mới ngay"), using a tiny 1-token request per account.
+- New version available? The menu shows "Cập nhật ngay". One click updates it.
 - Token not found? Add `name = /path/to/token-file` to `~/.config/claude-usage.conf`.
 - Shows `?`: click it to see the error, or check `~/.cache/claude-usage/last-run.log`.
 
