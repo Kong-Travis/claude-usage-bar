@@ -40,9 +40,9 @@ Delete `~/.config/swiftbar/claude-usage.1m.py` (and the SwiftBar app if you don'
 Free for everyone. If it saves you some time, you can buy me a coffee by scanning this VietQR code
 with any Vietnamese banking app:
 
-<img src="docs/donate-qr.jpg" alt="VietQR: BIDV 2890271697 TRINH VAN CONG" width="280">
+<img src="docs/donate-qr.png" alt="VietQR: BIDV 2890271697 TRINH VAN CONG" width="280">
 
-BIDV - 2890271697 - TRINH VAN CONG
+BIDV - 2890271697 - TRINH VAN CONG (the transfer note "Ung ho claude-usage-bar" is pre-filled)
 
 ## Build
 
