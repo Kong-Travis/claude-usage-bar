@@ -6,7 +6,7 @@ set -u
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
 fail() { printf '\n\033[31mLỗi: %s\033[0m\n' "$*"; pause; exit 1; }
-pause() { printf '\nNhấn Enter để tiếp tục...'; read -r _ </dev/tty 2>/dev/null; }
+pause() { printf '\nNhấn Enter để tiếp tục...'; read -r _ 2>/dev/null </dev/tty; }
 
 [ "$(uname)" = "Darwin" ] || fail "Bộ cài này chỉ chạy trên macOS."
 
@@ -82,12 +82,33 @@ EOF
 pause
 
 say "Cho SwiftBar tự chạy khi bật máy"
-cat <<'EOF'
-  Sắp mở System Settings > General > Login Items.
-  Ở phần "Open at Login", bấm dấu "+", chọn SwiftBar trong Applications rồi bấm "Open".
+login_items() {
+  osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null
+}
+if login_items | grep -q "SwiftBar"; then
+  info "Đã bật sẵn, mỗi lần bật máy SwiftBar sẽ tự mở."
+else
+  printf '  Bật tự chạy khi mở máy? (nên bật, không thì mỗi lần khởi động lại phải tự mở SwiftBar) [Y/n] '
+  read -r ans 2>/dev/null </dev/tty || ans=""
+  case "$ans" in
+    [nN]*) info "Bỏ qua. Muốn bật sau: SwiftBar > Preferences... > tích \"Launch at Login\"." ;;
+    *)
+      info "Nếu macOS hỏi \"Terminal muốn điều khiển System Events\" -> bấm \"OK\" (Allow)."
+      osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/SwiftBar.app", hidden:false}' >/dev/null 2>&1
+      if login_items | grep -q "SwiftBar"; then
+        info "Đã bật: mỗi lần bật máy SwiftBar sẽ tự mở."
+      else
+        cat <<'EOF'
+  Chưa bật được tự động. Làm tay (chỉ 1 lần):
+    Bấm vào chữ trên thanh menu > SwiftBar > Preferences... > tích "Launch at Login".
+  Hoặc: System Settings > General > Login Items > "Open at Login" > bấm "+" > chọn SwiftBar.
 EOF
-pause
-open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+        pause
+        open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+      fi
+      ;;
+  esac
+fi
 
 cat <<EOF
 

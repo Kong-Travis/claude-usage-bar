@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 REPO = "Kong-Travis/claude-usage-bar"
 PLUGIN_PATH_IN_REPO = "plugin/claude-usage.1m.py"
 API = "https://api.anthropic.com"
