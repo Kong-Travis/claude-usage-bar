@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 REPO = "Kong-Travis/claude-usage-bar"
 PLUGIN_PATH_IN_REPO = "plugin/claude-usage.1m.py"
 API = "https://api.anthropic.com"
@@ -466,6 +466,7 @@ def main():
     print("Cập nhật mỗi 3 phút | color=gray size=11")
     print("Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần | color=gray size=11")
     print("Phiên bản v%s | color=gray size=11 href=https://github.com/%s" % (VERSION, REPO))
+    print("Ủng hộ tác giả | href=https://github.com/%s#support" % REPO)
     me = os.path.realpath(__file__)
     print('Làm mới ngay | bash="%s" param1=--force terminal=false refresh=true' % me)
 
