@@ -92,10 +92,10 @@ open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
 cat <<EOF
 
 $(printf '\033[1m%s\033[0m' "Xong.")
-  Thanh menu hiện dạng "C 84/88  T 55/13": mỗi tài khoản là một chữ cái,
-  số đầu là % giới hạn 5 giờ, số sau là % giới hạn tuần. Bấm vào để xem
-  tên tài khoản và giờ reset. Tài khoản đăng nhập trình duyệt cập nhật mỗi 1 phút,
-  tài khoản token mỗi 5 phút. Nếu hiện "?", bấm vào để xem dòng "Lỗi: ..."
+  Thanh menu hiện dạng "C 87/88/94  T 79/17/0": mỗi tài khoản là một chữ cái,
+  ba số lần lượt là % giới hạn 5 giờ / tuần / Fable tuần. Bấm vào để xem
+  tên tài khoản và giờ reset. Tự cập nhật mỗi 3 phút, có bản mới thì menu
+  hiện nút "Cập nhật ngay". Nếu hiện "?", bấm vào để xem dòng "Lỗi: ..."
   hoặc xem file ~/.cache/claude-usage/last-run.log.
 
   Nếu thiếu tài khoản:

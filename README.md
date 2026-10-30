@@ -3,10 +3,10 @@
 See your Claude Code usage limits in the macOS menu bar, for every account on your Mac.
 
 ```
-C 85/88  T 60/14
+C 87/88/94  T 79/17/0
 ```
 
-Each letter is one account: first number = 5-hour limit %, second = weekly limit %.
+Each letter is one account. The numbers are: 5-hour limit % / weekly limit % / Fable weekly limit %.
 Orange at 70%, red at 90%. Click it to see account names and reset times.
 
 ## Install
@@ -26,7 +26,6 @@ bash "/Volumes/Claude Usage/Cài đặt Claude Usage.command"
 
 - Works with browser logins (`claude`) and `claude setup-token` tokens (aliases using
   `CLAUDE_CODE_OAUTH_TOKEN`). Accounts are found automatically.
-- The menu also shows the Fable weekly limit.
 - Refreshes every 3 minutes (or click "Làm mới ngay"), using a tiny 1-token request per account.
 - New version available? The menu shows "Cập nhật ngay". One click updates it.
 - Token not found? Add `name = /path/to/token-file` to `~/.config/claude-usage.conf`.

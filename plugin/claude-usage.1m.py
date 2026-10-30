@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 REPO = "Kong-Travis/claude-usage-bar"
 PLUGIN_PATH_IN_REPO = "plugin/claude-usage.1m.py"
 API = "https://api.anthropic.com"
@@ -379,6 +379,11 @@ def fmt_reset(epoch):
     return time.strftime("%H:%M %d/%m", time.localtime(epoch))
 
 
+def pcts(d):
+    """5-hour %, weekly %, then each per-model weekly % (e.g. Fable)."""
+    return [d["5h"], d["7d"]] + [m["pct"] for m in d.get("models", [])]
+
+
 def print_update_items(tag):
     if not tag or parse_version(tag) <= parse_version(VERSION):
         return
@@ -424,9 +429,9 @@ def main():
     log_errors(rows)
 
     known = [r for r in rows if r[2]]
-    worst = max([max(d["5h"], d["7d"]) for _, _, d, _ in known] or [0])
+    worst = max([max(pcts(d)) for _, _, d, _ in known] or [0])
     if len(rows) <= MAX_IN_TITLE:
-        title = "  ".join("%s %d/%d" % (s, round(d["5h"]), round(d["7d"])) if d else s + " ?"
+        title = "  ".join("%s %s" % (s, "/".join("%d" % round(x) for x in pcts(d))) if d else s + " ?"
                           for s, _, d, _ in rows)
     else:
         title = "Claude %d%%" % round(worst)
@@ -459,7 +464,7 @@ def main():
             print("Lỗi: %s | color=gray size=11" % err.replace("|", "/"))
         print("---")
     print("Cập nhật mỗi 3 phút | color=gray size=11")
-    print("Số đầu: % giới hạn 5 giờ, số sau: % giới hạn tuần | color=gray size=11")
+    print("Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần | color=gray size=11")
     print("Phiên bản v%s | color=gray size=11 href=https://github.com/%s" % (VERSION, REPO))
     me = os.path.realpath(__file__)
     print('Làm mới ngay | bash="%s" param1=--force terminal=false refresh=true' % me)
