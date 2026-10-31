@@ -168,7 +168,8 @@ class BuildSourcesTest(TempHome):
             return [a.label for a in source.accounts()]
 
         self.assertEqual(labels(WINDOWS), ["claude-ps", "claude-ci.cmd"])
-        self.assertEqual(labels(LINUX), [])
+        if os.name != "nt":  # Windows reports .cmd files as executable, so posix rules match too
+            self.assertEqual(labels(LINUX), [])
 
     @unittest.skipIf(os.name == "nt", "exec bits are not meaningful on Windows")
     def test_posix_scripts_need_the_exec_bit(self):

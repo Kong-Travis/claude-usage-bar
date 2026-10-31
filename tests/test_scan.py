@@ -23,7 +23,7 @@ class ScanCase(unittest.TestCase):
     def write(self, rel, text):
         p = os.path.join(self.home, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
+        with open(p, "w", encoding="utf-8", newline="") as f:  # exact byte sizes on Windows too
             f.write(text)
         return p
 

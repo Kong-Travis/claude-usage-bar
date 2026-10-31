@@ -80,7 +80,8 @@ class OldReleaseCanUpdate(unittest.TestCase):
     def test_v122_self_update_installs_the_new_bundle(self):
         try:
             old = subprocess.run(["git", "show", "%s:plugin/claude-usage.1m.py" % OLD_RELEASE],
-                                 cwd=ROOT, capture_output=True, text=True, check=True).stdout
+                                 cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                                 check=True).stdout
         except (OSError, subprocess.CalledProcessError):
             self.skipTest("git tag %s not available" % OLD_RELEASE)
         with open(BUNDLE, encoding="utf-8") as f:
