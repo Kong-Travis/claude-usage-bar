@@ -1,0 +1,15 @@
+C 50/20 | sfimage=arrow.down.circle
+---
+Có bản mới v9.9.9 (đang dùng v<VERSION>) | color=#2e7d32
+Cập nhật ngay | bash="<SELF>" param1=--update terminal=false refresh=true
+Xem thay đổi | href=https://github.com/Kong-Travis/claude-usage-bar/releases/tag/v9.9.9
+---
+C: claude-ci - token | size=13
+5 giờ: 50%  (reset sau 1 giờ)
+Tuần: 20%  (reset sau 1 ngày)
+---
+Cập nhật mỗi 3 phút | color=gray size=11
+Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần | color=gray size=11
+Phiên bản v<VERSION> | color=gray size=11 href=https://github.com/Kong-Travis/claude-usage-bar
+Ủng hộ tác giả | href=https://github.com/Kong-Travis/claude-usage-bar#support
+Làm mới ngay | bash="<SELF>" param1=--force terminal=false refresh=true

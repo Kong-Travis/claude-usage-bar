@@ -1,0 +1,307 @@
+"""Account sources. Each one finds a single kind of account; AccountRegistry merges them."""
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+import stat
+import subprocess
+from dataclasses import dataclass
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+
+from .config import KEYCHAIN_SERVICE
+from .domain import Account, AccountSource, Clock, LoginExpired, TokenAccount
+from .scan import ShellScanner, expand_path, read_token_file, token_in_text
+
+POSIX_RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".profile")
+WINDOWS_RC_FILES = POSIX_RC_FILES + tuple(
+    os.path.join(docs, shell, profile)
+    for docs in ("Documents", os.path.join("OneDrive", "Documents"))
+    for shell in ("PowerShell", "WindowsPowerShell")
+    for profile in ("Microsoft.PowerShell_profile.ps1", "profile.ps1")
+)
+SCRIPT_DIRS = ("bin", os.path.join(".local", "bin"))
+WINDOWS_SCRIPT_EXTS = ("", ".ps1", ".cmd", ".bat", ".sh")
+CREDENTIALS_FILE = ".credentials.json"
+
+
+# ---------- user config ----------
+
+@dataclass(frozen=True)
+class UserConfig:
+    """~/.config/claude-usage.conf, one entry per line:
+        label = /path/to/token-file     add a token the scan cannot find
+        keychain = off                  hide browser logins (keychain and credentials files)
+    """
+    token_files: Tuple[Tuple[str, str], ...] = ()
+    show_logins: bool = True
+
+    @classmethod
+    def load(cls, path: str, home: str) -> UserConfig:
+        token_files, show_logins = [], True
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return cls()
+        for line in lines:
+            line = line.split("#", 1)[0].strip()
+            if "=" not in line:
+                continue
+            key, val = (s.strip() for s in line.split("=", 1))
+            if key in ("keychain", "logins"):
+                show_logins = val.lower() not in ("off", "no", "false", "0")
+            elif val:
+                token_files.append((key, expand_path(val, home)))
+        return cls(tuple(token_files), show_logins)
+
+
+# ---------- macOS keychain ----------
+
+class Keychain:
+    """The macOS login keychain, through /usr/bin/security."""
+
+    def __init__(self, security: str = "/usr/bin/security", run=subprocess.run):
+        self._security = security
+        self._run = run
+
+    def services(self, prefix: str) -> List[str]:
+        out = self._run([self._security, "dump-keychain"], capture_output=True, text=True,
+                        timeout=15).stdout
+        names = set(re.findall(r'"svce"<blob>="(%s[^"]*)"' % re.escape(prefix), out))
+        return sorted(names, key=lambda s: (s != prefix, s))
+
+    def password(self, service: str) -> str:
+        return self._run([self._security, "find-generic-password", "-s", service, "-w"],
+                         capture_output=True, text=True, timeout=10).stdout
+
+
+class KeychainAccount(Account):
+    is_login = True
+
+    def __init__(self, service: str, keychain: Keychain):
+        suffix = service[len(KEYCHAIN_SERVICE):].strip("-")
+        super().__init__("claude (%s)" % suffix if suffix else "claude")
+        self.service = service
+        self._keychain = keychain
+
+    @property
+    def identity(self) -> str:
+        return self.service
+
+    def token(self) -> str:
+        return json.loads(self._keychain.password(self.service))["claudeAiOauth"]["accessToken"]
+
+
+class KeychainSource:
+    def __init__(self, keychain: Keychain):
+        self._keychain = keychain
+
+    def accounts(self) -> List[Account]:
+        return [KeychainAccount(s, self._keychain) for s in self._keychain.services(KEYCHAIN_SERVICE)]
+
+
+# ---------- credentials files (Linux, Windows, macOS fallback) ----------
+
+def config_dir_label(directory: str) -> str:
+    """~/.claude -> "claude", ~/.claude-work -> "claude (work)"."""
+    name = os.path.basename(os.path.normpath(directory)).lstrip(".")
+    rest = re.sub(r"^claude[-_.]?", "", name, flags=re.I)
+    if not rest:
+        return "claude"
+    return "claude (%s)" % rest if name.lower().startswith("claude") else name
+
+
+class CredentialsFileAccount(Account):
+    """A browser login stored in <config dir>/.credentials.json."""
+    is_login = True
+
+    def __init__(self, path: str, clock: Clock):
+        super().__init__(config_dir_label(os.path.dirname(path)))
+        self.path = path
+        self._clock = clock
+
+    @property
+    def identity(self) -> str:
+        return os.path.normcase(os.path.realpath(self.path))
+
+    def oauth(self) -> dict:
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)["claudeAiOauth"]
+
+    def expired(self) -> bool:
+        expires_ms = self.oauth().get("expiresAt") or 0
+        return bool(expires_ms) and expires_ms / 1000 < self._clock.now()
+
+    def token(self) -> str:
+        if self.expired():
+            raise LoginExpired("đăng nhập đã hết hạn, mở `claude` một lần để làm mới")
+        return self.oauth()["accessToken"]
+
+
+class CredentialsFileSource:
+    """Every config dir that holds a .credentials.json.
+
+    skip_expired: on macOS the keychain is the real store and the file is a fallback that is
+    often left behind expired, so expired files are hidden there.
+    """
+
+    def __init__(self, config_dirs: Callable[[], Iterable[str]], clock: Clock, skip_expired: bool):
+        self._config_dirs = config_dirs
+        self._clock = clock
+        self._skip_expired = skip_expired
+
+    def accounts(self) -> List[Account]:
+        result: List[Account] = []
+        for d in self._config_dirs():
+            path = os.path.join(d, CREDENTIALS_FILE)
+            if not os.path.isfile(path):
+                continue
+            acc = CredentialsFileAccount(path, self._clock)
+            try:
+                if self._skip_expired and acc.expired():
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            result.append(acc)
+        return result
+
+
+class ConfigDirFinder:
+    """Candidate Claude config dirs: $CLAUDE_CONFIG_DIR, ~/.claude, ~/.claude-*, and any dir an
+    alias or script assigns to CLAUDE_CONFIG_DIR."""
+
+    def __init__(self, home: str, env_dir: Optional[str], scanner: ShellScanner,
+                 shell_files: Callable[[], Iterable[Tuple[str, str]]]):
+        self._home = home
+        self._env_dir = env_dir
+        self._scanner = scanner
+        self._shell_files = shell_files
+
+    def __call__(self) -> List[str]:
+        dirs = [self._env_dir] if self._env_dir else []
+        dirs.append(os.path.join(self._home, ".claude"))
+        dirs += sorted(glob.glob(os.path.join(self._home, ".claude[-_.]*")))
+        for path, _ in self._shell_files():
+            dirs += self._scanner.config_dirs(path)
+        seen, unique = set(), []
+        for d in dirs:
+            key = os.path.normcase(os.path.realpath(d))
+            if key not in seen:
+                seen.add(key)
+                unique.append(d)
+        return unique
+
+
+# ---------- setup-tokens ----------
+
+class ShellFiles:
+    """(path, default label) of every rc/profile file and script that may set a token."""
+
+    def __init__(self, home: str, rc_files: Sequence[str], is_script: Callable[[str, os.stat_result], bool]):
+        self._home = home
+        self._rc_files = rc_files
+        self._is_script = is_script
+
+    def __call__(self) -> List[Tuple[str, str]]:
+        files = [(os.path.join(self._home, rc), os.path.basename(rc)) for rc in self._rc_files]
+        for d in SCRIPT_DIRS:
+            d = os.path.join(self._home, d)
+            try:
+                entries = sorted(os.listdir(d))
+            except OSError:
+                continue
+            for e in entries:
+                p = os.path.join(d, e)
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and self._is_script(p, st):
+                    files.append((p, e))
+        return files
+
+
+def is_posix_script(path: str, st: os.stat_result) -> bool:
+    return bool(st.st_mode & 0o111)
+
+
+def is_windows_script(path: str, st: os.stat_result) -> bool:
+    return os.path.splitext(path)[1].lower() in WINDOWS_SCRIPT_EXTS
+
+
+class ShellTokenSource:
+    def __init__(self, files: Callable[[], Iterable[Tuple[str, str]]], scanner: ShellScanner):
+        self._files = files
+        self._scanner = scanner
+
+    def accounts(self) -> List[Account]:
+        return [TokenAccount(label, token)
+                for path, default in self._files()
+                for label, token in self._scanner.tokens(path, default)]
+
+
+class EnvTokenSource:
+    """CLAUDE_CODE_OAUTH_TOKEN from the environment or, on Windows, the user's registry."""
+
+    def __init__(self, readers: Sequence[Callable[[], Optional[str]]]):
+        self._readers = readers
+
+    def accounts(self) -> List[Account]:
+        result: List[Account] = []
+        for read in self._readers:
+            try:
+                value = read()
+            except OSError:
+                continue
+            token = token_in_text(value)
+            if token:
+                result.append(TokenAccount("env", token))
+        return result
+
+
+def windows_registry_token() -> Optional[str]:
+    """HKCU\\Environment\\CLAUDE_CODE_OAUTH_TOKEN, as written by `setx`."""
+    import winreg  # Windows only
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return str(winreg.QueryValueEx(key, "CLAUDE_CODE_OAUTH_TOKEN")[0])
+    except FileNotFoundError:
+        return None
+
+
+class ConfTokenSource:
+    def __init__(self, config: UserConfig):
+        self._config = config
+
+    def accounts(self) -> List[Account]:
+        result: List[Account] = []
+        for label, path in self._config.token_files:
+            token = read_token_file(path)
+            if token:
+                result.append(TokenAccount(label, token))
+        return result
+
+
+# ---------- registry ----------
+
+class AccountRegistry:
+    """All accounts from every source, in source order, without duplicates.
+    A source that fails (no keychain, unreadable file) is skipped."""
+
+    def __init__(self, sources: Sequence[AccountSource]):
+        self._sources = sources
+
+    def accounts(self) -> List[Account]:
+        seen, result = set(), []
+        for source in self._sources:
+            try:
+                found = source.accounts()
+            except Exception:
+                continue
+            for acc in found:
+                if acc.identity not in seen:
+                    seen.add(acc.identity)
+                    result.append(acc)
+        return result

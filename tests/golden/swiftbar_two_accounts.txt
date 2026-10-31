@@ -1,0 +1,17 @@
+T 0/65/1  W 93/72/50 | color=red
+---
+T: claude-token - token | size=13
+5 giờ: 0%  (reset sau 2 giờ 15 phút)
+Tuần: 65%  (reset sau 2 ngày 21 giờ)
+Fable (tuần): 1%  (reset sau 2 ngày 21 giờ)
+---
+W: work - token | size=13
+5 giờ: 93%  (reset sau 45 phút) | color=red
+Tuần: 72%  (reset sau 6 ngày) | color=orange
+Fable (tuần): 50%  (reset sau 6 ngày)
+---
+Cập nhật mỗi 3 phút | color=gray size=11
+Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần | color=gray size=11
+Phiên bản v<VERSION> | color=gray size=11 href=https://github.com/Kong-Travis/claude-usage-bar
+Ủng hộ tác giả | href=https://github.com/Kong-Travis/claude-usage-bar#support
+Làm mới ngay | bash="<SELF>" param1=--force terminal=false refresh=true

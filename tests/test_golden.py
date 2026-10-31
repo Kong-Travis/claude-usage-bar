@@ -1,0 +1,107 @@
+"""SwiftBar output of the shipped plugin, pinned byte for byte.
+
+Run with UPDATE_GOLDEN=1 to rewrite the files in tests/golden/ (only when an output change is
+intended).
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import unittest
+
+from fakes import FakeHome, FakeServer, Plan, run_plugin, tok
+
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden")
+HOUR, DAY = 3600, 86400
+CONF_NO_KEYCHAIN = "keychain = off\n"
+
+
+def scenario_two_accounts(home: FakeHome):
+    home.write(".config/claude-usage.conf", CONF_NO_KEYCHAIN + "work = ~/tokens/work.txt\n")
+    home.write("tokens/work.txt", tok("WORK") + "\n")
+    home.write(".zshrc", "# alias claude-old='CLAUDE_CODE_OAUTH_TOKEN=%s claude'\n"
+                         "alias claude-token='CLAUDE_CODE_OAUTH_TOKEN=%s claude'\n"
+               % (tok("COMMENTED"), tok("TOKEN")))
+    return {
+        tok("TOKEN"): Plan({"5h": (0.0, 2 * HOUR + 15 * 60), "7d": (0.65, 2 * DAY + 21 * HOUR),
+                            "7d_oi": (0.01, 2 * DAY + 21 * HOUR)}),
+        tok("WORK"): Plan({"5h": (0.93, 45 * 60), "7d": (0.72, 6 * DAY), "7d_oi": (0.5, 6 * DAY)},
+                          status=429),
+    }, "v1.2.2"
+
+
+def scenario_update_and_haiku_fallback(home: FakeHome):
+    home.write(".config/claude-usage.conf", CONF_NO_KEYCHAIN)
+    home.write("bin/claude-ci", "#!/bin/sh\nexport CLAUDE_CODE_OAUTH_TOKEN=$(cat ~/.ci-token)\n",
+               0o755)
+    home.write(".ci-token", tok("CI"))
+    return {tok("CI"): Plan({"5h": (0.5, HOUR), "7d": (0.2, DAY)}, fable=False)}, "v9.9.9"
+
+
+def scenario_many_accounts_and_stale(home: FakeHome):
+    lines = []
+    for i, name in enumerate(["a1", "a2", "a3", "b1"]):
+        home.write("t/%s" % name, tok(name.upper()))
+        lines.append("claude-%s = ~/t/%s" % (name, name))
+    home.write(".config/claude-usage.conf", CONF_NO_KEYCHAIN + "\n".join(lines) + "\n")
+    # b1 fails now but has an old cached result to fall back on.
+    import hashlib
+    key = hashlib.sha256(tok("B1").encode()).hexdigest()[:16]
+    now = int(time.time())
+    p = home.write(".cache/claude-usage/%s.json" % key, json.dumps(
+        {"5h": 10.0, "5h_reset": now + 3 * HOUR, "7d": 20.0, "7d_reset": now + 3 * DAY,
+         "models": []}))
+    os.utime(p, (now - 3600, now - 3600))
+    win = {"5h": (0.1, HOUR + 30), "7d": (0.2, DAY + 30)}
+    return {tok("A1"): Plan(win), tok("A2"): Plan(win), tok("A3"): Plan(win),
+            tok("B1"): Plan({}, status=500)}, "v1.0.0"
+
+
+def scenario_no_accounts(home: FakeHome):
+    home.write(".config/claude-usage.conf", CONF_NO_KEYCHAIN)
+    return {}, "v1.2.2"
+
+
+SCENARIOS = {
+    "two_accounts": scenario_two_accounts,
+    "update_and_haiku_fallback": scenario_update_and_haiku_fallback,
+    "many_accounts_and_stale": scenario_many_accounts_and_stale,
+    "no_accounts": scenario_no_accounts,
+}
+
+
+def render(name: str, *args: str, plugin: str | None = None, extra_env=None) -> str:
+    with FakeHome() as home:
+        plans, tag = SCENARIOS[name](home)
+        with FakeServer(plans, latest_tag=tag) as server:
+            kw = {"plugin": plugin} if plugin else {}
+            return run_plugin(home, server, *args, extra_env=extra_env, **kw)
+
+
+class GoldenSwiftBar(unittest.TestCase):
+    def check(self, name: str):
+        got = render(name)
+        path = os.path.join(GOLDEN, "swiftbar_%s.txt" % name)
+        if os.environ.get("UPDATE_GOLDEN"):
+            os.makedirs(GOLDEN, exist_ok=True)
+            with open(path, "w") as f:
+                f.write(got)
+        with open(path) as f:
+            self.assertEqual(f.read(), got)
+
+    def test_two_accounts(self):
+        self.check("two_accounts")
+
+    def test_update_and_haiku_fallback(self):
+        self.check("update_and_haiku_fallback")
+
+    def test_many_accounts_and_stale(self):
+        self.check("many_accounts_and_stale")
+
+    def test_no_accounts(self):
+        self.check("no_accounts")
+
+
+if __name__ == "__main__":
+    unittest.main()

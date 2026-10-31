@@ -13,6 +13,8 @@ DMG_ENTRY="Cài đặt Claude Usage.command"
 
 rm -rf "$DIST" && mkdir -p "$DIST/dmg"
 
+/usr/bin/python3 tools/bundle.py
+
 /usr/bin/python3 - "$TEMPLATE" "$PLUGIN" "$CMD" <<'EOF'
 import sys
 tmpl, plugin, out = sys.argv[1:]
