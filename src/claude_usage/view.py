@@ -6,15 +6,17 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Set, Tuple
 
 from .domain import AccountRow, Clock
+from .i18n import EN, VI, Translator
 
-REFRESH, UPDATE, OPEN, QUIT = "refresh", "update", "open", "quit"
+REFRESH, UPDATE, OPEN, QUIT, LANGUAGE = "refresh", "update", "open", "quit", "language"
 GRAY, GREEN, ORANGE, RED = "gray", "#2e7d32", "orange", "red"
 
 
 @dataclass(frozen=True)
 class Action:
-    kind: str       # REFRESH | UPDATE | OPEN | QUIT
+    kind: str       # REFRESH | UPDATE | OPEN | QUIT | LANGUAGE
     url: str = ""   # for OPEN
+    value: str = ""  # for LANGUAGE: the language to switch to
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,8 @@ class Menu:
 
 def short_name(label: str, taken: Set[str]) -> str:
     """One letter per account (C, T, W...), with a digit when letters collide."""
-    base = re.sub(r"^claude[-_.]?", "", label, flags=re.I) or label
+    # "claude-token" -> T, "claude (work)" -> W; plain "claude" keeps its C.
+    base = re.sub(r"^claude[\s(_.-]*", "", label, flags=re.I) or label
     s = base[:1].upper() or "?"
     n = 2
     while s in taken:
@@ -51,9 +54,10 @@ def short_name(label: str, taken: Set[str]) -> str:
 
 
 class Presenter:
-    def __init__(self, clock: Clock, version: str, repo_url: str, warn: float, crit: float,
-                 max_in_title: int):
+    def __init__(self, clock: Clock, tr: Translator, version: str, repo_url: str, warn: float,
+                 crit: float, max_in_title: int):
         self._clock = clock
+        self._tr = tr
         self._version = version
         self._repo_url = repo_url
         self._warn = warn
@@ -64,39 +68,49 @@ class Presenter:
         return RED if pct >= self._crit else ORANGE if pct >= self._warn else None
 
     def time_left(self, epoch: int) -> str:
-        """Time left until a reset, e.g. "sau 2 giờ 15 phút". Frontends redraw every
-        minute, so the countdown stays current between probes."""
-        mins = -(-(epoch - int(self._clock.now())) // 60)  # round up: never "0 phút" early
+        """Time left until a reset, e.g. "sau 2 giờ 15 phút" / "in 2h 15m". Frontends redraw
+        every minute, so the countdown stays current between probes."""
+        tr = self._tr
+        mins = -(-(epoch - int(self._clock.now())) // 60)  # round up: never "0 minutes" early
         if mins <= 0:
-            return "ngay bây giờ"
+            return tr("left_now")
         days, rest = divmod(mins, 1440)
         hours, mins = divmod(rest, 60)
         if days:
-            parts = [(days, "ngày"), (hours, "giờ")]
+            parts = [(days, "unit_day"), (hours, "unit_hour")]
         elif hours:
-            parts = [(hours, "giờ"), (mins, "phút")]
+            parts = [(hours, "unit_hour"), (mins, "unit_minute")]
         else:
-            parts = [(mins, "phút")]
-        return "sau " + " ".join("%d %s" % (n, u) for n, u in parts if n)
+            parts = [(mins, "unit_minute")]
+        return tr("left_prefix") + " ".join(tr(unit, n=n) for n, unit in parts if n)
 
     def update_items(self, tag: Optional[str]) -> List[MenuItem]:
         if not tag:
             return []
+        tr = self._tr
         return [
-            MenuItem("Có bản mới %s (đang dùng v%s)" % (tag, self._version), color=GREEN),
-            MenuItem("Cập nhật ngay", action=Action(UPDATE)),
-            MenuItem("Xem thay đổi", action=Action(OPEN, "%s/releases/tag/%s" % (self._repo_url, tag))),
+            MenuItem(tr("update_available", tag=tag, version=self._version), color=GREEN),
+            MenuItem(tr("update_now"), action=Action(UPDATE)),
+            MenuItem(tr("view_changes"), action=Action(OPEN, "%s/releases/tag/%s" % (self._repo_url, tag))),
             SEPARATOR,
         ]
 
+    def language_item(self) -> MenuItem:
+        """Switches to the other language. Written in the target language, so a user who
+        cannot read the current one still finds it."""
+        target = EN if self._tr.lang == VI else VI
+        return MenuItem(Translator(target)("switch_language"), action=Action(LANGUAGE, value=target))
+
     def present(self, rows: Sequence[AccountRow], new_tag: Optional[str]) -> Menu:
         """new_tag: the newer release to offer, or None."""
+        tr = self._tr
         update = self.update_items(new_tag)
         if not rows:
             return Menu("Claude ?", None, bool(new_tag), None, tuple(update + [
-                MenuItem("Không tìm thấy tài khoản Claude Code nào"),
-                MenuItem("Đăng nhập bằng `claude`, hoặc khai báo token trong ~/.config/claude-usage.conf",
-                         size=11),
+                MenuItem(tr("no_accounts")),
+                MenuItem(tr("no_accounts_hint"), size=11),
+                SEPARATOR,
+                self.language_item(),
             ]))
 
         known = [r.usage for r in rows if r.usage]
@@ -113,12 +127,13 @@ class Presenter:
         for r in rows:
             items += self.account_items(r)
         items += [
-            MenuItem("Cập nhật mỗi 3 phút", color=GRAY, size=11),
-            MenuItem("Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần", color=GRAY, size=11),
-            MenuItem("Phiên bản v%s" % self._version, color=GRAY, size=11,
+            MenuItem(tr("refresh_every"), color=GRAY, size=11),
+            MenuItem(tr("number_order"), color=GRAY, size=11),
+            MenuItem(tr("version", version=self._version), color=GRAY, size=11,
                      action=Action(OPEN, self._repo_url)),
-            MenuItem("Ủng hộ tác giả", action=Action(OPEN, self._repo_url + "#support")),
-            MenuItem("Làm mới ngay", action=Action(REFRESH)),
+            MenuItem(tr("support"), action=Action(OPEN, self._repo_url + "#support")),
+            self.language_item(),
+            MenuItem(tr("refresh_now"), action=Action(REFRESH)),
         ]
         return Menu(title, self.color(worst), bool(new_tag), worst if known else None, tuple(items))
 
@@ -126,23 +141,24 @@ class Presenter:
         head = "%s: %s" % (r.short, r.label)
         if r.detail:
             head += " - " + r.detail
+        tr = self._tr
         items = [MenuItem(head, size=13)]
         u = r.usage
         if u is None:
-            items.append(MenuItem("Không đọc được hạn mức", color=GRAY))
+            items.append(MenuItem(tr("usage_unreadable"), color=GRAY))
         else:
-            for name, pct, reset in (("5 giờ", u.five_hour, u.five_hour_reset),
-                                     ("Tuần", u.weekly, u.weekly_reset)):
-                items.append(MenuItem("%s: %d%%  (reset %s)" % (name, round(pct), self.time_left(reset)),
-                                      color=self.color(pct)))
+            for key, pct, reset in (("five_hour", u.five_hour, u.five_hour_reset),
+                                    ("weekly", u.weekly, u.weekly_reset)):
+                items.append(MenuItem(tr("usage_line", name=tr(key), pct="%d" % round(pct),
+                                         left=self.time_left(reset)), color=self.color(pct)))
             for m in u.models:
-                text = "%s (tuần): %d%%" % (m.name, round(m.pct))
+                text = tr("model_line", name=tr("model_weekly", name=m.name), pct="%d" % round(m.pct))
                 if m.reset:
-                    text += "  (reset %s)" % self.time_left(m.reset)
+                    text += tr("reset_suffix", left=self.time_left(m.reset))
                 items.append(MenuItem(text, color=self.color(m.pct)))
             if r.error:
-                items.append(MenuItem("Số liệu cũ, lần cập nhật vừa rồi bị lỗi", color=GRAY, size=11))
+                items.append(MenuItem(tr("stale_data"), color=GRAY, size=11))
         if r.error:
-            items.append(MenuItem("Lỗi: %s" % r.error, color=GRAY, size=11))
+            items.append(MenuItem(tr("error_line", error=r.error), color=GRAY, size=11))
         items.append(SEPARATOR)
         return items

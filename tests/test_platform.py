@@ -1,0 +1,226 @@
+"""Composition root: OS detection and which sources each OS gets."""
+import srcpath  # noqa: F401  (must come first)
+
+import inspect
+import json
+import os
+import shutil
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+from claude_usage import platform_setup
+from claude_usage.infra import HttpResponse
+from claude_usage.platform_setup import (LINUX, MACOS, WINDOWS, Host, build, build_sources,
+                                         detect_os)
+from claude_usage.sources import (ConfTokenSource, CredentialsFileSource, EnvTokenSource,
+                                  KeychainSource, ShellTokenSource, UserConfig)
+
+P = "anthropic-ratelimit-unified-"
+
+
+def tok(name):
+    return "sk-ant-oat01-" + name
+
+
+class FakeClock:
+    def __init__(self, t=None):
+        self.t = time.time() if t is None else t
+
+    def now(self):
+        return self.t
+
+
+def call_build_sources(host, config, clock):
+    """build_sources takes a translator in newer versions; pass one when it asks."""
+    if "tr" in inspect.signature(build_sources).parameters:
+        from claude_usage.i18n import Translator
+        return build_sources(host, config, clock, Translator())
+    return build_sources(host, config, clock)
+
+
+class DetectOs(unittest.TestCase):
+    def test_platforms(self):
+        self.assertEqual(detect_os("darwin"), MACOS)
+        self.assertEqual(detect_os("linux"), LINUX)
+        self.assertEqual(detect_os("linux2"), LINUX)
+        self.assertEqual(detect_os("freebsd13"), LINUX)
+        self.assertEqual(detect_os("win32"), WINDOWS)
+
+    def test_current_platform_is_one_of_the_three(self):
+        self.assertIn(detect_os(), (MACOS, LINUX, WINDOWS))
+
+
+class HostTest(unittest.TestCase):
+    def test_paths(self):
+        h = Host(LINUX, "/home/u", {}, "/p/plugin.py")
+        self.assertEqual(h.cache_dir, os.path.join("/home/u", ".cache", "claude-usage"))
+        self.assertEqual(h.conf_path, os.path.join("/home/u", ".config", "claude-usage.conf"))
+
+    def test_current_uses_userprofile_on_windows_and_home_elsewhere(self):
+        env = {"HOME": "/home/u", "USERPROFILE": "C:\\Users\\u"}
+        with mock.patch.dict(os.environ, env):
+            with mock.patch.object(platform_setup, "detect_os", return_value=WINDOWS):
+                self.assertEqual(Host.current().home, "C:\\Users\\u")
+            with mock.patch.object(platform_setup, "detect_os", return_value=LINUX):
+                self.assertEqual(Host.current().home, "/home/u")
+            with mock.patch.object(platform_setup, "detect_os", return_value=MACOS):
+                h = Host.current()
+                self.assertEqual((h.os_name, h.home), (MACOS, "/home/u"))
+
+
+class TempHome(unittest.TestCase):
+    def setUp(self):
+        self.home = os.path.realpath(tempfile.mkdtemp(prefix="cub-plat-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def write(self, rel, text, mode=None):
+        p = os.path.join(self.home, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        if mode is not None:
+            os.chmod(p, mode)
+        return p
+
+    def host(self, os_name, env=None):
+        return Host(os_name, self.home, env or {}, os.path.join(self.home, "plugin.py"))
+
+    def sources(self, os_name, config=None, env=None, clock=None):
+        return call_build_sources(self.host(os_name, env), config or UserConfig(),
+                                  clock or FakeClock())
+
+
+def kinds(sources):
+    return [type(s) for s in sources]
+
+
+class BuildSourcesTest(TempHome):
+    def test_macos_has_the_keychain_first(self):
+        self.assertEqual(kinds(self.sources(MACOS)),
+                         [KeychainSource, CredentialsFileSource, ShellTokenSource,
+                          EnvTokenSource, ConfTokenSource])
+
+    def test_linux_and_windows_have_no_keychain(self):
+        for os_name in (LINUX, WINDOWS):
+            with self.subTest(os=os_name):
+                self.assertEqual(kinds(self.sources(os_name)),
+                                 [CredentialsFileSource, ShellTokenSource, EnvTokenSource,
+                                  ConfTokenSource])
+
+    def test_hiding_logins_drops_the_login_sources(self):
+        for os_name in (MACOS, LINUX, WINDOWS):
+            with self.subTest(os=os_name):
+                got = kinds(self.sources(os_name, UserConfig(show_logins=False)))
+                self.assertEqual(got, [ShellTokenSource, EnvTokenSource, ConfTokenSource])
+
+    def credentials_file_account_labels(self, os_name, expires_ms):
+        self.write(".claude/.credentials.json",
+                   json.dumps({"claudeAiOauth": {"accessToken": "A", "expiresAt": expires_ms}}))
+        clock = FakeClock(1000.0)
+        source = [s for s in self.sources(os_name, clock=clock) if isinstance(s, CredentialsFileSource)][0]
+        return [a.label for a in source.accounts()]
+
+    def test_macos_hides_an_expired_credentials_file(self):
+        self.assertEqual(self.credentials_file_account_labels(MACOS, 500_000), [])
+        self.assertEqual(self.credentials_file_account_labels(MACOS, 2_000_000), ["claude"])
+
+    def test_linux_and_windows_keep_an_expired_credentials_file(self):
+        for os_name in (LINUX, WINDOWS):
+            with self.subTest(os=os_name):
+                self.assertEqual(self.credentials_file_account_labels(os_name, 500_000), ["claude"])
+
+    def test_claude_config_dir_from_the_environment_is_searched(self):
+        custom = os.path.join(self.home, "elsewhere")
+        self.write("elsewhere/.credentials.json",
+                   json.dumps({"claudeAiOauth": {"accessToken": "A"}}))
+        env = {"CLAUDE_CONFIG_DIR": custom}
+        source = [s for s in self.sources(LINUX, env=env) if isinstance(s, CredentialsFileSource)][0]
+        self.assertEqual([os.path.dirname(a.path) for a in source.accounts()], [custom])
+
+    def test_environment_token_source(self):
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": tok("ENV")}
+        source = [s for s in self.sources(LINUX, env=env) if isinstance(s, EnvTokenSource)][0]
+        self.assertEqual([(a.label, a.token()) for a in source.accounts()], [("env", tok("ENV"))])
+
+    def test_conf_token_source_uses_the_given_config(self):
+        self.write("t.txt", tok("CONF"))
+        cfg = UserConfig((("work", os.path.join(self.home, "t.txt")),))
+        source = [s for s in self.sources(LINUX, cfg) if isinstance(s, ConfTokenSource)][0]
+        self.assertEqual([(a.label, a.token()) for a in source.accounts()], [("work", tok("CONF"))])
+
+    def test_shell_scan_reads_posix_rc_files_on_every_os(self):
+        self.write(".zshrc", "alias claude-w='CLAUDE_CODE_OAUTH_TOKEN=%s claude'\n" % tok("RC"))
+        for os_name in (LINUX, WINDOWS, MACOS):
+            with self.subTest(os=os_name):
+                source = [s for s in self.sources(os_name) if isinstance(s, ShellTokenSource)][0]
+                self.assertEqual([a.label for a in source.accounts()], ["claude-w"])
+
+    def test_powershell_profile_and_scripts_are_scanned_only_on_windows(self):
+        self.write(os.path.join("Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+                   'function claude-ps { $env:CLAUDE_CODE_OAUTH_TOKEN = "%s"; claude @args }\n'
+                   % tok("PS"))
+        self.write(os.path.join("bin", "claude-ci.cmd"), "set CLAUDE_CODE_OAUTH_TOKEN=%s\n" % tok("CMD"))
+
+        def labels(os_name):
+            source = [s for s in self.sources(os_name) if isinstance(s, ShellTokenSource)][0]
+            return [a.label for a in source.accounts()]
+
+        self.assertEqual(labels(WINDOWS), ["claude-ps", "claude-ci.cmd"])
+        self.assertEqual(labels(LINUX), [])
+
+    @unittest.skipIf(os.name == "nt", "exec bits are not meaningful on Windows")
+    def test_posix_scripts_need_the_exec_bit(self):
+        self.write("bin/claude-ci", "export CLAUDE_CODE_OAUTH_TOKEN=%s\n" % tok("X"), 0o755)
+        self.write("bin/not-exec", "export CLAUDE_CODE_OAUTH_TOKEN=%s\n" % tok("Y"), 0o644)
+        source = [s for s in self.sources(LINUX) if isinstance(s, ShellTokenSource)][0]
+        self.assertEqual([a.label for a in source.accounts()], ["claude-ci"])
+
+
+class FakeHttp:
+    """Anthropic answers rate-limit headers; everything else (GitHub) is an error."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.requests = []
+
+    def request(self, url, method="GET", headers=None, body=None, timeout=15):
+        self.requests.append((method, url))
+        if url.endswith("/v1/messages"):
+            now = int(self.clock.now())
+            return HttpResponse(200, {
+                P + "5h-utilization": "0.1", P + "5h-reset": str(now + 3600),
+                P + "7d-utilization": "0.2", P + "7d-reset": str(now + 86400)})
+        return HttpResponse(404)
+
+
+class BuildTest(TempHome):
+    def test_build_wires_a_working_app(self):
+        self.write(".config/claude-usage.conf", "keychain = off\nci = ~/t.txt\n")
+        self.write("t.txt", tok("CI"))
+        clock = FakeClock()
+        http = FakeHttp(clock)
+        services = build(self.host(LINUX), clock=clock, http=http)
+        menu = services.app.menu()
+        self.assertEqual(menu.title, "C 10/20")
+        self.assertIn("C: ci - token", [i.text for i in menu.items])
+        self.assertFalse(menu.update_available)
+        # The result is cached under the home dir, and the run log is written next to it.
+        self.assertTrue(os.path.isfile(os.path.join(self.home, ".cache", "claude-usage", "last-run.log")))
+
+    def test_build_without_any_account(self):
+        self.write(".config/claude-usage.conf", "keychain = off\n")
+        clock = FakeClock()
+        services = build(self.host(LINUX), clock=clock, http=FakeHttp(clock))
+        self.assertEqual(services.app.menu().title, "Claude ?")
+
+    def test_updater_targets_the_plugin_file(self):
+        self.write(".config/claude-usage.conf", "keychain = off\n")
+        clock = FakeClock()
+        services = build(self.host(LINUX), clock=clock, http=FakeHttp(clock))
+        self.assertFalse(services.updater.update())  # GitHub says 404: nothing to install
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import List
 
-from .view import OPEN, QUIT, REFRESH, UPDATE, Menu, MenuItem
+from .view import LANGUAGE, OPEN, QUIT, REFRESH, UPDATE, Menu, MenuItem
 
 SWIFTBAR, ARGOS = "swiftbar", "argos"
 CLI_FLAGS = {REFRESH: "--force", UPDATE: "--update"}
@@ -51,5 +51,8 @@ class XbarRenderer:
         elif a and a.kind in CLI_FLAGS:
             params.append('bash="%s" param1=%s terminal=false refresh=true'
                           % (self._self_path, CLI_FLAGS[a.kind]))
+        elif a and a.kind == LANGUAGE:
+            params.append('bash="%s" param1=--lang param2=%s terminal=false refresh=true'
+                          % (self._self_path, a.value))
         text = item.text.replace("|", "/")
         return text + (" | " + " ".join(params) if params else "")

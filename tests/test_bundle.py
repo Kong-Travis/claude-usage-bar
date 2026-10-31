@@ -1,7 +1,6 @@
 """The shipped plugin file: single, self-contained, and installable by older releases."""
 from __future__ import annotations
 
-import io
 import os
 import re
 import shutil
@@ -10,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from fakes import BUNDLE, ROOT
+from fakes import BUNDLE, ROOT, base_env
 
 OLD_RELEASE = "v1.2.2"
 
@@ -63,15 +62,13 @@ class BundleShape(unittest.TestCase):
         try:
             path = os.path.join(tmp, "claude-usage.1m.py")
             shutil.copy(BUNDLE, path)
-            with open(os.path.join(home, "placeholder"), "w"):
-                pass
             os.makedirs(os.path.join(home, ".config"))
             with open(os.path.join(home, ".config", "claude-usage.conf"), "w") as f:
                 f.write("keychain = off\n")
-            env = {"HOME": home, "USERPROFILE": home, "PATH": os.environ.get("PATH", ""),
-                   "CLAUDE_USAGE_GITHUB": "http://127.0.0.1:9"}
+            env = base_env(home)
+            env["CLAUDE_USAGE_GITHUB"] = "http://127.0.0.1:9"
             out = subprocess.run([sys.executable, "-I", path], cwd=tmp, env=env,
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, encoding="utf-8", timeout=60)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue(out.stdout.startswith("Claude ? |"), out.stdout)
         finally:
@@ -96,21 +93,19 @@ class OldReleaseCanUpdate(unittest.TestCase):
             for path, text in ((old_path, old), (new_path, new), (driver, OLD_UPDATE_DRIVER)):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(text)
-            env = {"HOME": tmp, "PATH": os.environ.get("PATH", "")}
+            env = base_env(tmp)
             out = subprocess.run([sys.executable, driver, old_path, new_path], env=env,
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, encoding="utf-8", timeout=60)
             self.assertEqual(out.returncode, 0, out.stderr)
             with open(old_path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), new)
             # The updated file must then run on its own.
-            with open(os.path.join(tmp, ".config-placeholder"), "w"):
-                pass
             os.makedirs(os.path.join(tmp, ".config"), exist_ok=True)
             with open(os.path.join(tmp, ".config", "claude-usage.conf"), "w") as f:
                 f.write("keychain = off\n")
             env["CLAUDE_USAGE_GITHUB"] = "http://127.0.0.1:9"
             run = subprocess.run([sys.executable, "-I", old_path], env=env, cwd=tmp,
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, encoding="utf-8", timeout=60)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn("Claude ?", run.stdout)
         finally:

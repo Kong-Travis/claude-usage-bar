@@ -129,18 +129,23 @@ class FakeHome:
         self.cleanup()
 
 
+def base_env(home: str) -> dict:
+    """A minimal environment for running the plugin, valid on every OS."""
+    env = {"HOME": home, "USERPROFILE": home, "PATH": os.environ.get("PATH", ""),
+           "PYTHONIOENCODING": "utf-8"}
+    for name in ("SYSTEMROOT", "SystemRoot", "TEMP", "TMP", "WINDIR"):  # Windows needs these
+        if name in os.environ:
+            env[name] = os.environ[name]
+    return env
+
+
 def run_plugin(home: FakeHome, server: FakeServer, *args: str, plugin: str = BUNDLE,
                extra_env: dict[str, str] | None = None) -> str:
-    env = {
-        "HOME": home.path,
-        "USERPROFILE": home.path,
-        "PATH": os.environ.get("PATH", ""),
-        "CLAUDE_USAGE_API": server.url,
-        "CLAUDE_USAGE_GITHUB": server.url,
-    }
+    env = base_env(home.path)
+    env.update({"CLAUDE_USAGE_API": server.url, "CLAUDE_USAGE_GITHUB": server.url})
     env.update(extra_env or {})
     out = subprocess.run([sys.executable, plugin] + list(args), env=env, capture_output=True,
-                         text=True, timeout=60)
+                         text=True, encoding="utf-8", timeout=60)
     if out.returncode != 0:
         raise AssertionError("plugin failed (%d): %s" % (out.returncode, out.stderr))
     with open(plugin, encoding="utf-8") as f:

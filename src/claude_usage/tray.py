@@ -13,10 +13,10 @@ import webbrowser
 from abc import ABC, abstractmethod
 from typing import Callable, List, Optional, Sequence
 
-from .view import OPEN, QUIT, REFRESH, UPDATE, Action, Menu, MenuItem, SEPARATOR
+from .i18n import Translator
+from .view import LANGUAGE, OPEN, QUIT, REFRESH, UPDATE, Action, Menu, MenuItem, SEPARATOR
 
 TRAY_REFRESH_SECONDS = 60
-QUIT_ITEM = MenuItem("Thoát", action=Action(QUIT))
 
 
 class TrayBackend(ABC):
@@ -55,9 +55,14 @@ class TrayController:
 
     def __init__(self, backend: TrayBackend, build_menu: Callable[[bool], Menu],
                  refresh: Callable[[], None], update: Callable[[], bool],
-                 restart: Callable[[], None], open_url: Callable[[str], object] = webbrowser.open,
+                 restart: Callable[[], None], translator: Callable[[], Translator],
+                 set_language: Callable[[str], None],
+                 open_url: Callable[[str], object] = webbrowser.open,
                  spawn: Callable[[Callable[[], None]], None] = None):
+        """translator is called each time, so a language switch applies at once."""
         self._backend = backend
+        self._translator = translator
+        self._set_language = set_language
         self._build_menu = build_menu
         self._refresh = refresh
         self._update = update
@@ -65,31 +70,37 @@ class TrayController:
         self._open_url = open_url
         self._spawn = spawn or _start_daemon_thread
         self._busy = threading.Lock()
+        self._again = None  # None, or the force flag of a reload asked for while one ran
 
     def run(self) -> None:
         self._backend.set_action_handler(self.on_action)
         self._backend.run(self.start)
 
     def start(self) -> None:
-        self._backend.show(loading_menu())
+        self._backend.show(loading_menu(self._translator()))
         self._backend.every(TRAY_REFRESH_SECONDS, self.reload)
         self.reload()
 
     def reload(self, force: bool = False) -> None:
-        """Rebuild the menu in the background; skip if a rebuild is already running."""
+        """Rebuild the menu in the background. If a rebuild is already running, run one more
+        right after it, so a click (refresh, language) is never lost."""
         if not self._busy.acquire(blocking=False):
+            self._again = bool(self._again) or force
             return
 
         def work():
             try:
                 if force:
                     self._refresh()
-                menu = with_quit(self._build_menu(False))
+                menu = with_quit(self._build_menu(False), self._translator())
             except Exception as e:  # keep the icon alive whatever happens
-                menu = error_menu(e)
+                menu = error_menu(e, self._translator())
             finally:
                 self._busy.release()
             self._backend.call_soon(lambda: self._backend.show(menu))
+            again, self._again = self._again, None
+            if again is not None:
+                self.reload(force=again)
 
         self._spawn(work)
 
@@ -100,6 +111,9 @@ class TrayController:
             self._open_url(action.url)
         elif action.kind == UPDATE:
             self._spawn(self._do_update)
+        elif action.kind == LANGUAGE:
+            self._set_language(action.value)
+            self.reload()
         elif action.kind == QUIT:
             self._backend.quit()
 
@@ -107,7 +121,8 @@ class TrayController:
         try:
             replaced = self._update()
         except Exception as e:
-            self._backend.call_soon(lambda: self._backend.show(error_menu(e)))
+            menu = error_menu(e, self._translator())
+            self._backend.call_soon(lambda: self._backend.show(menu))
             return
         if replaced:
             self._backend.call_soon(self._restart_now)
@@ -123,20 +138,24 @@ def _start_daemon_thread(fn: Callable[[], None]) -> None:
     threading.Thread(target=fn, daemon=True).start()
 
 
-def with_quit(menu: Menu) -> Menu:
+def quit_item(tr: Translator) -> MenuItem:
+    return MenuItem(tr("quit"), action=Action(QUIT))
+
+
+def with_quit(menu: Menu, tr: Translator) -> Menu:
     return Menu(menu.title, menu.title_color, menu.update_available, menu.worst,
-                menu.items + (SEPARATOR, QUIT_ITEM))
+                menu.items + (SEPARATOR, quit_item(tr)))
 
 
-def loading_menu() -> Menu:
-    return Menu("Claude ...", None, False, None, (MenuItem("Đang đọc hạn mức..."), SEPARATOR, QUIT_ITEM))
+def loading_menu(tr: Translator) -> Menu:
+    return Menu("Claude ...", None, False, None, (MenuItem(tr("loading")), SEPARATOR, quit_item(tr)))
 
 
-def error_menu(e: Exception) -> Menu:
+def error_menu(e: Exception, tr: Translator) -> Menu:
     return Menu("Claude ?", None, False, None, (
-        MenuItem("Lỗi: %s: %s" % (type(e).__name__, str(e)[:160]), color="gray"),
-        MenuItem("Làm mới ngay", action=Action(REFRESH)),
-        SEPARATOR, QUIT_ITEM))
+        MenuItem(tr("error_line", error="%s: %s" % (type(e).__name__, str(e)[:160])), color="gray"),
+        MenuItem(tr("refresh_now"), action=Action(REFRESH)),
+        SEPARATOR, quit_item(tr)))
 
 
 def relaunch_command(argv: Sequence[str], executable: str) -> List[str]:

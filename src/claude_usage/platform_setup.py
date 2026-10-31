@@ -11,6 +11,7 @@ from .config import (EMAIL_EVERY, MAX_IN_TITLE, MODEL_WINDOWS, PLUGIN_PATH_IN_RE
                      PROBE_MODELS, REPO, REPO_URL, UPDATE_EVERY, VERSION, CRIT_PCT, WARN_PCT,
                      Endpoints)
 from .domain import AccountSource, Clock, SystemClock
+from .i18n import Translator, normalize_language
 from .infra import HttpClient, JsonCache, UrllibHttpClient
 from .scan import ShellScanner
 from .sources import (POSIX_RC_FILES, WINDOWS_RC_FILES, AccountRegistry, ConfigDirFinder,
@@ -55,7 +56,12 @@ class Host:
         return os.path.join(self.home, ".config", "claude-usage.conf")
 
 
-def build_sources(host: Host, config: UserConfig, clock: Clock) -> List[AccountSource]:
+def build_translator(host: Host, config: UserConfig) -> Translator:
+    """CLAUDE_USAGE_LANG, else `language =` in the conf file, else Vietnamese."""
+    return Translator(normalize_language(host.env.get("CLAUDE_USAGE_LANG")) or config.language or "")
+
+
+def build_sources(host: Host, config: UserConfig, clock: Clock, tr: Translator) -> List[AccountSource]:
     scanner = ShellScanner(host.home)
     if host.os_name == WINDOWS:
         files = ShellFiles(host.home, WINDOWS_RC_FILES, is_windows_script)
@@ -69,7 +75,7 @@ def build_sources(host: Host, config: UserConfig, clock: Clock) -> List[AccountS
         if host.os_name == MACOS:
             sources.append(KeychainSource(Keychain()))
         dirs = ConfigDirFinder(host.home, host.env.get("CLAUDE_CONFIG_DIR"), scanner, files)
-        sources.append(CredentialsFileSource(dirs, clock, skip_expired=host.os_name == MACOS))
+        sources.append(CredentialsFileSource(dirs, clock, host.os_name == MACOS, tr))
     sources += [ShellTokenSource(files, scanner), EnvTokenSource(env_readers),
                 ConfTokenSource(config)]
     return sources
@@ -79,6 +85,7 @@ def build_sources(host: Host, config: UserConfig, clock: Clock) -> List[AccountS
 class Services:
     app: UsageApp
     updater: SelfUpdater
+    tr: Translator
 
 
 def build(host: Host, clock: Clock = None, http: HttpClient = None) -> Services:
@@ -87,17 +94,18 @@ def build(host: Host, clock: Clock = None, http: HttpClient = None) -> Services:
     endpoints = Endpoints.from_env(host.env)
     cache = JsonCache(host.cache_dir, clock)
     config = UserConfig.load(host.conf_path, host.home)
+    tr = build_translator(host, config)
     releases = ReleaseChecker(http, endpoints.github_api, REPO, cache, UPDATE_EVERY)
     app = UsageApp(
-        registry=AccountRegistry(build_sources(host, config, clock)),
+        registry=AccountRegistry(build_sources(host, config, clock, tr)),
         usage=UsageService(UsageProbe(http, endpoints.api, PROBE_MODELS, MODEL_WINDOWS), cache,
                            PROBE_EVERY),
         identity=IdentityService(ProfileClient(http, endpoints.api), cache, EMAIL_EVERY),
         releases=releases,
-        presenter=Presenter(clock, VERSION, REPO_URL, WARN_PCT, CRIT_PCT, MAX_IN_TITLE),
+        presenter=Presenter(clock, tr, VERSION, REPO_URL, WARN_PCT, CRIT_PCT, MAX_IN_TITLE),
         run_log=RunLog(host.cache_dir, clock, VERSION),
         version=VERSION,
     )
     updater = SelfUpdater(http, releases, endpoints.github_raw, REPO, PLUGIN_PATH_IN_REPO, VERSION,
                           host.self_path)
-    return Services(app, updater)
+    return Services(app, updater, tr)

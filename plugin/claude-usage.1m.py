@@ -173,6 +173,89 @@ class Endpoints:
         )
 
 
+# ---------- claude_usage/i18n.py ----------
+
+"""User-facing text in Vietnamese (default) and English.
+
+Each entry keeps both languages side by side, so a new string is added in one place.
+Frontends with strings of their own pass an extra catalog to Translator.with_catalog.
+"""
+
+
+from typing import Dict, Mapping, Optional
+
+VI, EN = "vi", "en"
+LANGUAGES = (VI, EN)
+DEFAULT_LANGUAGE = VI
+LANGUAGE_NAMES = {VI: "Tiếng Việt", EN: "English"}
+
+Catalog = Mapping[str, Mapping[str, str]]
+
+CATALOG: Dict[str, Dict[str, str]] = {
+    "five_hour": {VI: "5 giờ", EN: "5-hour"},
+    "weekly": {VI: "Tuần", EN: "Weekly"},
+    "model_weekly": {VI: "{name} (tuần)", EN: "{name} (weekly)"},
+    "usage_line": {VI: "{name}: {pct}%  (reset {left})", EN: "{name}: {pct}%  (resets {left})"},
+    "model_line": {VI: "{name}: {pct}%", EN: "{name}: {pct}%"},
+    "reset_suffix": {VI: "  (reset {left})", EN: "  (resets {left})"},
+    "left_now": {VI: "ngay bây giờ", EN: "now"},
+    "left_prefix": {VI: "sau ", EN: "in "},
+    "unit_day": {VI: "{n} ngày", EN: "{n}d"},
+    "unit_hour": {VI: "{n} giờ", EN: "{n}h"},
+    "unit_minute": {VI: "{n} phút", EN: "{n}m"},
+    "update_available": {VI: "Có bản mới {tag} (đang dùng v{version})",
+                         EN: "New version {tag} (you have v{version})"},
+    "update_now": {VI: "Cập nhật ngay", EN: "Update now"},
+    "view_changes": {VI: "Xem thay đổi", EN: "What's new"},
+    "no_accounts": {VI: "Không tìm thấy tài khoản Claude Code nào",
+                    EN: "No Claude Code account found"},
+    "no_accounts_hint": {
+        VI: "Đăng nhập bằng `claude`, hoặc khai báo token trong ~/.config/claude-usage.conf",
+        EN: "Log in with `claude`, or add a token to ~/.config/claude-usage.conf"},
+    "usage_unreadable": {VI: "Không đọc được hạn mức", EN: "Could not read the limits"},
+    "stale_data": {VI: "Số liệu cũ, lần cập nhật vừa rồi bị lỗi",
+                   EN: "Old numbers, the last refresh failed"},
+    "error_line": {VI: "Lỗi: {error}", EN: "Error: {error}"},
+    "refresh_every": {VI: "Cập nhật mỗi 3 phút", EN: "Refreshes every 3 minutes"},
+    "number_order": {VI: "Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần",
+                     EN: "Numbers: % of 5-hour / weekly / Fable weekly limit"},
+    "version": {VI: "Phiên bản v{version}", EN: "Version v{version}"},
+    "support": {VI: "Ủng hộ tác giả", EN: "Support the author"},
+    "refresh_now": {VI: "Làm mới ngay", EN: "Refresh now"},
+    # Shown in the language it switches to (see Presenter.language_item).
+    "switch_language": {VI: "Chuyển sang tiếng Việt", EN: "Switch to English"},
+    "quit": {VI: "Thoát", EN: "Quit"},
+    "loading": {VI: "Đang đọc hạn mức...", EN: "Reading limits..."},
+    "login_expired": {VI: "đăng nhập đã hết hạn, mở `claude` một lần để làm mới",
+                      EN: "login expired, open `claude` once to renew it"},
+}
+
+
+def normalize_language(value: Optional[str]) -> Optional[str]:
+    """"en", "EN", "en_US.UTF-8", "English" -> "en"; unknown -> None."""
+    v = (value or "").strip().lower()
+    for lang in LANGUAGES:
+        if v.startswith(lang) or v == LANGUAGE_NAMES[lang].lower():
+            return lang
+    return None
+
+
+class Translator:
+    def __init__(self, lang: str = DEFAULT_LANGUAGE, catalog: Catalog = CATALOG):
+        self.lang = normalize_language(lang) or DEFAULT_LANGUAGE
+        self._catalog = catalog
+
+    def __call__(self, key: str, **kwargs: object) -> str:
+        entry = self._catalog[key]
+        text = entry.get(self.lang) or entry[DEFAULT_LANGUAGE]
+        return text.format(**kwargs) if kwargs else text
+
+    def with_catalog(self, extra: Catalog) -> Translator:
+        merged: Dict[str, Mapping[str, str]] = dict(self._catalog)
+        merged.update(extra)
+        return Translator(self.lang, merged)
+
+
 # ---------- claude_usage/scan.py ----------
 
 """Find setup-tokens and Claude config dirs written in shell, PowerShell and cmd files."""
@@ -314,13 +397,15 @@ class UserConfig:
     """~/.config/claude-usage.conf, one entry per line:
         label = /path/to/token-file     add a token the scan cannot find
         keychain = off                  hide browser logins (keychain and credentials files)
+        language = en                   English menus (default: vi, Vietnamese)
     """
     token_files: Tuple[Tuple[str, str], ...] = ()
     show_logins: bool = True
+    language: Optional[str] = None
 
     @classmethod
     def load(cls, path: str, home: str) -> UserConfig:
-        token_files, show_logins = [], True
+        token_files, show_logins, language = [], True, None
         try:
             with open(path, encoding="utf-8", errors="ignore") as f:
                 lines = f.read().splitlines()
@@ -333,9 +418,37 @@ class UserConfig:
             key, val = (s.strip() for s in line.split("=", 1))
             if key in ("keychain", "logins"):
                 show_logins = val.lower() not in ("off", "no", "false", "0")
+            elif key == "language":
+                language = normalize_language(val)
             elif val:
                 token_files.append((key, expand_path(val, home)))
-        return cls(tuple(token_files), show_logins)
+        return cls(tuple(token_files), show_logins, language)
+
+
+def set_conf_value(path: str, key: str, value: str) -> None:
+    """Set `key = value` in the conf file, replacing an existing line for key and keeping
+    every other line (comments included)."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    new_line = "%s = %s" % (key, value)
+    out, done = [], False
+    for line in lines:
+        if line.split("#", 1)[0].split("=", 1)[0].strip() == key and "=" in line:
+            if not done:
+                out.append(new_line)
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(new_line)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.replace(tmp, path)
 
 
 # ---------- macOS keychain ----------
@@ -398,10 +511,11 @@ class CredentialsFileAccount(Account):
     """A browser login stored in <config dir>/.credentials.json."""
     is_login = True
 
-    def __init__(self, path: str, clock: Clock):
+    def __init__(self, path: str, clock: Clock, tr: Translator):
         super().__init__(config_dir_label(os.path.dirname(path)))
         self.path = path
         self._clock = clock
+        self._tr = tr
 
     @property
     def identity(self) -> str:
@@ -417,7 +531,7 @@ class CredentialsFileAccount(Account):
 
     def token(self) -> str:
         if self.expired():
-            raise LoginExpired("đăng nhập đã hết hạn, mở `claude` một lần để làm mới")
+            raise LoginExpired(self._tr("login_expired"))
         return self.oauth()["accessToken"]
 
 
@@ -428,10 +542,12 @@ class CredentialsFileSource:
     often left behind expired, so expired files are hidden there.
     """
 
-    def __init__(self, config_dirs: Callable[[], Iterable[str]], clock: Clock, skip_expired: bool):
+    def __init__(self, config_dirs: Callable[[], Iterable[str]], clock: Clock, skip_expired: bool,
+                 tr: Translator):
         self._config_dirs = config_dirs
         self._clock = clock
         self._skip_expired = skip_expired
+        self._tr = tr
 
     def accounts(self) -> List[Account]:
         result: List[Account] = []
@@ -439,7 +555,7 @@ class CredentialsFileSource:
             path = os.path.join(d, CREDENTIALS_FILE)
             if not os.path.isfile(path):
                 continue
-            acc = CredentialsFileAccount(path, self._clock)
+            acc = CredentialsFileAccount(path, self._clock, self._tr)
             try:
                 if self._skip_expired and acc.expired():
                     continue
@@ -904,14 +1020,15 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Set, Tuple
 
 
-REFRESH, UPDATE, OPEN, QUIT = "refresh", "update", "open", "quit"
+REFRESH, UPDATE, OPEN, QUIT, LANGUAGE = "refresh", "update", "open", "quit", "language"
 GRAY, GREEN, ORANGE, RED = "gray", "#2e7d32", "orange", "red"
 
 
 @dataclass(frozen=True)
 class Action:
-    kind: str       # REFRESH | UPDATE | OPEN | QUIT
+    kind: str       # REFRESH | UPDATE | OPEN | QUIT | LANGUAGE
     url: str = ""   # for OPEN
+    value: str = ""  # for LANGUAGE: the language to switch to
 
 
 @dataclass(frozen=True)
@@ -937,7 +1054,8 @@ class Menu:
 
 def short_name(label: str, taken: Set[str]) -> str:
     """One letter per account (C, T, W...), with a digit when letters collide."""
-    base = re.sub(r"^claude[-_.]?", "", label, flags=re.I) or label
+    # "claude-token" -> T, "claude (work)" -> W; plain "claude" keeps its C.
+    base = re.sub(r"^claude[\s(_.-]*", "", label, flags=re.I) or label
     s = base[:1].upper() or "?"
     n = 2
     while s in taken:
@@ -948,9 +1066,10 @@ def short_name(label: str, taken: Set[str]) -> str:
 
 
 class Presenter:
-    def __init__(self, clock: Clock, version: str, repo_url: str, warn: float, crit: float,
-                 max_in_title: int):
+    def __init__(self, clock: Clock, tr: Translator, version: str, repo_url: str, warn: float,
+                 crit: float, max_in_title: int):
         self._clock = clock
+        self._tr = tr
         self._version = version
         self._repo_url = repo_url
         self._warn = warn
@@ -961,39 +1080,49 @@ class Presenter:
         return RED if pct >= self._crit else ORANGE if pct >= self._warn else None
 
     def time_left(self, epoch: int) -> str:
-        """Time left until a reset, e.g. "sau 2 giờ 15 phút". Frontends redraw every
-        minute, so the countdown stays current between probes."""
-        mins = -(-(epoch - int(self._clock.now())) // 60)  # round up: never "0 phút" early
+        """Time left until a reset, e.g. "sau 2 giờ 15 phút" / "in 2h 15m". Frontends redraw
+        every minute, so the countdown stays current between probes."""
+        tr = self._tr
+        mins = -(-(epoch - int(self._clock.now())) // 60)  # round up: never "0 minutes" early
         if mins <= 0:
-            return "ngay bây giờ"
+            return tr("left_now")
         days, rest = divmod(mins, 1440)
         hours, mins = divmod(rest, 60)
         if days:
-            parts = [(days, "ngày"), (hours, "giờ")]
+            parts = [(days, "unit_day"), (hours, "unit_hour")]
         elif hours:
-            parts = [(hours, "giờ"), (mins, "phút")]
+            parts = [(hours, "unit_hour"), (mins, "unit_minute")]
         else:
-            parts = [(mins, "phút")]
-        return "sau " + " ".join("%d %s" % (n, u) for n, u in parts if n)
+            parts = [(mins, "unit_minute")]
+        return tr("left_prefix") + " ".join(tr(unit, n=n) for n, unit in parts if n)
 
     def update_items(self, tag: Optional[str]) -> List[MenuItem]:
         if not tag:
             return []
+        tr = self._tr
         return [
-            MenuItem("Có bản mới %s (đang dùng v%s)" % (tag, self._version), color=GREEN),
-            MenuItem("Cập nhật ngay", action=Action(UPDATE)),
-            MenuItem("Xem thay đổi", action=Action(OPEN, "%s/releases/tag/%s" % (self._repo_url, tag))),
+            MenuItem(tr("update_available", tag=tag, version=self._version), color=GREEN),
+            MenuItem(tr("update_now"), action=Action(UPDATE)),
+            MenuItem(tr("view_changes"), action=Action(OPEN, "%s/releases/tag/%s" % (self._repo_url, tag))),
             SEPARATOR,
         ]
 
+    def language_item(self) -> MenuItem:
+        """Switches to the other language. Written in the target language, so a user who
+        cannot read the current one still finds it."""
+        target = EN if self._tr.lang == VI else VI
+        return MenuItem(Translator(target)("switch_language"), action=Action(LANGUAGE, value=target))
+
     def present(self, rows: Sequence[AccountRow], new_tag: Optional[str]) -> Menu:
         """new_tag: the newer release to offer, or None."""
+        tr = self._tr
         update = self.update_items(new_tag)
         if not rows:
             return Menu("Claude ?", None, bool(new_tag), None, tuple(update + [
-                MenuItem("Không tìm thấy tài khoản Claude Code nào"),
-                MenuItem("Đăng nhập bằng `claude`, hoặc khai báo token trong ~/.config/claude-usage.conf",
-                         size=11),
+                MenuItem(tr("no_accounts")),
+                MenuItem(tr("no_accounts_hint"), size=11),
+                SEPARATOR,
+                self.language_item(),
             ]))
 
         known = [r.usage for r in rows if r.usage]
@@ -1010,12 +1139,13 @@ class Presenter:
         for r in rows:
             items += self.account_items(r)
         items += [
-            MenuItem("Cập nhật mỗi 3 phút", color=GRAY, size=11),
-            MenuItem("Thứ tự số: % giới hạn 5 giờ / tuần / Fable tuần", color=GRAY, size=11),
-            MenuItem("Phiên bản v%s" % self._version, color=GRAY, size=11,
+            MenuItem(tr("refresh_every"), color=GRAY, size=11),
+            MenuItem(tr("number_order"), color=GRAY, size=11),
+            MenuItem(tr("version", version=self._version), color=GRAY, size=11,
                      action=Action(OPEN, self._repo_url)),
-            MenuItem("Ủng hộ tác giả", action=Action(OPEN, self._repo_url + "#support")),
-            MenuItem("Làm mới ngay", action=Action(REFRESH)),
+            MenuItem(tr("support"), action=Action(OPEN, self._repo_url + "#support")),
+            self.language_item(),
+            MenuItem(tr("refresh_now"), action=Action(REFRESH)),
         ]
         return Menu(title, self.color(worst), bool(new_tag), worst if known else None, tuple(items))
 
@@ -1023,24 +1153,25 @@ class Presenter:
         head = "%s: %s" % (r.short, r.label)
         if r.detail:
             head += " - " + r.detail
+        tr = self._tr
         items = [MenuItem(head, size=13)]
         u = r.usage
         if u is None:
-            items.append(MenuItem("Không đọc được hạn mức", color=GRAY))
+            items.append(MenuItem(tr("usage_unreadable"), color=GRAY))
         else:
-            for name, pct, reset in (("5 giờ", u.five_hour, u.five_hour_reset),
-                                     ("Tuần", u.weekly, u.weekly_reset)):
-                items.append(MenuItem("%s: %d%%  (reset %s)" % (name, round(pct), self.time_left(reset)),
-                                      color=self.color(pct)))
+            for key, pct, reset in (("five_hour", u.five_hour, u.five_hour_reset),
+                                    ("weekly", u.weekly, u.weekly_reset)):
+                items.append(MenuItem(tr("usage_line", name=tr(key), pct="%d" % round(pct),
+                                         left=self.time_left(reset)), color=self.color(pct)))
             for m in u.models:
-                text = "%s (tuần): %d%%" % (m.name, round(m.pct))
+                text = tr("model_line", name=tr("model_weekly", name=m.name), pct="%d" % round(m.pct))
                 if m.reset:
-                    text += "  (reset %s)" % self.time_left(m.reset)
+                    text += tr("reset_suffix", left=self.time_left(m.reset))
                 items.append(MenuItem(text, color=self.color(m.pct)))
             if r.error:
-                items.append(MenuItem("Số liệu cũ, lần cập nhật vừa rồi bị lỗi", color=GRAY, size=11))
+                items.append(MenuItem(tr("stale_data"), color=GRAY, size=11))
         if r.error:
-            items.append(MenuItem("Lỗi: %s" % r.error, color=GRAY, size=11))
+            items.append(MenuItem(tr("error_line", error=r.error), color=GRAY, size=11))
         items.append(SEPARATOR)
         return items
 
@@ -1177,7 +1308,12 @@ class Host:
         return os.path.join(self.home, ".config", "claude-usage.conf")
 
 
-def build_sources(host: Host, config: UserConfig, clock: Clock) -> List[AccountSource]:
+def build_translator(host: Host, config: UserConfig) -> Translator:
+    """CLAUDE_USAGE_LANG, else `language =` in the conf file, else Vietnamese."""
+    return Translator(normalize_language(host.env.get("CLAUDE_USAGE_LANG")) or config.language or "")
+
+
+def build_sources(host: Host, config: UserConfig, clock: Clock, tr: Translator) -> List[AccountSource]:
     scanner = ShellScanner(host.home)
     if host.os_name == WINDOWS:
         files = ShellFiles(host.home, WINDOWS_RC_FILES, is_windows_script)
@@ -1191,7 +1327,7 @@ def build_sources(host: Host, config: UserConfig, clock: Clock) -> List[AccountS
         if host.os_name == MACOS:
             sources.append(KeychainSource(Keychain()))
         dirs = ConfigDirFinder(host.home, host.env.get("CLAUDE_CONFIG_DIR"), scanner, files)
-        sources.append(CredentialsFileSource(dirs, clock, skip_expired=host.os_name == MACOS))
+        sources.append(CredentialsFileSource(dirs, clock, host.os_name == MACOS, tr))
     sources += [ShellTokenSource(files, scanner), EnvTokenSource(env_readers),
                 ConfTokenSource(config)]
     return sources
@@ -1201,6 +1337,7 @@ def build_sources(host: Host, config: UserConfig, clock: Clock) -> List[AccountS
 class Services:
     app: UsageApp
     updater: SelfUpdater
+    tr: Translator
 
 
 def build(host: Host, clock: Clock = None, http: HttpClient = None) -> Services:
@@ -1209,20 +1346,21 @@ def build(host: Host, clock: Clock = None, http: HttpClient = None) -> Services:
     endpoints = Endpoints.from_env(host.env)
     cache = JsonCache(host.cache_dir, clock)
     config = UserConfig.load(host.conf_path, host.home)
+    tr = build_translator(host, config)
     releases = ReleaseChecker(http, endpoints.github_api, REPO, cache, UPDATE_EVERY)
     app = UsageApp(
-        registry=AccountRegistry(build_sources(host, config, clock)),
+        registry=AccountRegistry(build_sources(host, config, clock, tr)),
         usage=UsageService(UsageProbe(http, endpoints.api, PROBE_MODELS, MODEL_WINDOWS), cache,
                            PROBE_EVERY),
         identity=IdentityService(ProfileClient(http, endpoints.api), cache, EMAIL_EVERY),
         releases=releases,
-        presenter=Presenter(clock, VERSION, REPO_URL, WARN_PCT, CRIT_PCT, MAX_IN_TITLE),
+        presenter=Presenter(clock, tr, VERSION, REPO_URL, WARN_PCT, CRIT_PCT, MAX_IN_TITLE),
         run_log=RunLog(host.cache_dir, clock, VERSION),
         version=VERSION,
     )
     updater = SelfUpdater(http, releases, endpoints.github_raw, REPO, PLUGIN_PATH_IN_REPO, VERSION,
                           host.self_path)
-    return Services(app, updater)
+    return Services(app, updater, tr)
 
 
 # ---------- claude_usage/tray.py ----------
@@ -1244,7 +1382,6 @@ from typing import Callable, List, Optional, Sequence
 
 
 TRAY_REFRESH_SECONDS = 60
-QUIT_ITEM = MenuItem("Thoát", action=Action(QUIT))
 
 
 class TrayBackend(ABC):
@@ -1283,9 +1420,14 @@ class TrayController:
 
     def __init__(self, backend: TrayBackend, build_menu: Callable[[bool], Menu],
                  refresh: Callable[[], None], update: Callable[[], bool],
-                 restart: Callable[[], None], open_url: Callable[[str], object] = webbrowser.open,
+                 restart: Callable[[], None], translator: Callable[[], Translator],
+                 set_language: Callable[[str], None],
+                 open_url: Callable[[str], object] = webbrowser.open,
                  spawn: Callable[[Callable[[], None]], None] = None):
+        """translator is called each time, so a language switch applies at once."""
         self._backend = backend
+        self._translator = translator
+        self._set_language = set_language
         self._build_menu = build_menu
         self._refresh = refresh
         self._update = update
@@ -1293,31 +1435,37 @@ class TrayController:
         self._open_url = open_url
         self._spawn = spawn or _start_daemon_thread
         self._busy = threading.Lock()
+        self._again = None  # None, or the force flag of a reload asked for while one ran
 
     def run(self) -> None:
         self._backend.set_action_handler(self.on_action)
         self._backend.run(self.start)
 
     def start(self) -> None:
-        self._backend.show(loading_menu())
+        self._backend.show(loading_menu(self._translator()))
         self._backend.every(TRAY_REFRESH_SECONDS, self.reload)
         self.reload()
 
     def reload(self, force: bool = False) -> None:
-        """Rebuild the menu in the background; skip if a rebuild is already running."""
+        """Rebuild the menu in the background. If a rebuild is already running, run one more
+        right after it, so a click (refresh, language) is never lost."""
         if not self._busy.acquire(blocking=False):
+            self._again = bool(self._again) or force
             return
 
         def work():
             try:
                 if force:
                     self._refresh()
-                menu = with_quit(self._build_menu(False))
+                menu = with_quit(self._build_menu(False), self._translator())
             except Exception as e:  # keep the icon alive whatever happens
-                menu = error_menu(e)
+                menu = error_menu(e, self._translator())
             finally:
                 self._busy.release()
             self._backend.call_soon(lambda: self._backend.show(menu))
+            again, self._again = self._again, None
+            if again is not None:
+                self.reload(force=again)
 
         self._spawn(work)
 
@@ -1328,6 +1476,9 @@ class TrayController:
             self._open_url(action.url)
         elif action.kind == UPDATE:
             self._spawn(self._do_update)
+        elif action.kind == LANGUAGE:
+            self._set_language(action.value)
+            self.reload()
         elif action.kind == QUIT:
             self._backend.quit()
 
@@ -1335,7 +1486,8 @@ class TrayController:
         try:
             replaced = self._update()
         except Exception as e:
-            self._backend.call_soon(lambda: self._backend.show(error_menu(e)))
+            menu = error_menu(e, self._translator())
+            self._backend.call_soon(lambda: self._backend.show(menu))
             return
         if replaced:
             self._backend.call_soon(self._restart_now)
@@ -1351,20 +1503,24 @@ def _start_daemon_thread(fn: Callable[[], None]) -> None:
     threading.Thread(target=fn, daemon=True).start()
 
 
-def with_quit(menu: Menu) -> Menu:
+def quit_item(tr: Translator) -> MenuItem:
+    return MenuItem(tr("quit"), action=Action(QUIT))
+
+
+def with_quit(menu: Menu, tr: Translator) -> Menu:
     return Menu(menu.title, menu.title_color, menu.update_available, menu.worst,
-                menu.items + (SEPARATOR, QUIT_ITEM))
+                menu.items + (SEPARATOR, quit_item(tr)))
 
 
-def loading_menu() -> Menu:
-    return Menu("Claude ...", None, False, None, (MenuItem("Đang đọc hạn mức..."), SEPARATOR, QUIT_ITEM))
+def loading_menu(tr: Translator) -> Menu:
+    return Menu("Claude ...", None, False, None, (MenuItem(tr("loading")), SEPARATOR, quit_item(tr)))
 
 
-def error_menu(e: Exception) -> Menu:
+def error_menu(e: Exception, tr: Translator) -> Menu:
     return Menu("Claude ?", None, False, None, (
-        MenuItem("Lỗi: %s: %s" % (type(e).__name__, str(e)[:160]), color="gray"),
-        MenuItem("Làm mới ngay", action=Action(REFRESH)),
-        SEPARATOR, QUIT_ITEM))
+        MenuItem(tr("error_line", error="%s: %s" % (type(e).__name__, str(e)[:160])), color="gray"),
+        MenuItem(tr("refresh_now"), action=Action(REFRESH)),
+        SEPARATOR, quit_item(tr)))
 
 
 def relaunch_command(argv: Sequence[str], executable: str) -> List[str]:
@@ -1436,6 +1592,9 @@ class XbarRenderer:
         elif a and a.kind in CLI_FLAGS:
             params.append('bash="%s" param1=%s terminal=false refresh=true'
                           % (self._self_path, CLI_FLAGS[a.kind]))
+        elif a and a.kind == LANGUAGE:
+            params.append('bash="%s" param1=--lang param2=%s terminal=false refresh=true'
+                          % (self._self_path, a.value))
         text = item.text.replace("|", "/")
         return text + (" | " + " ".join(params) if params else "")
 
@@ -1449,46 +1608,947 @@ import sys
 from typing import List, Optional
 
 
-USAGE = """usage: claude-usage [--force | --update | --tray]
-  (none)    print the menu for SwiftBar (macOS) or Argos (GNOME)
-  --force   probe every account now, ignoring the cache
-  --update  install the latest release over this file
-  --tray    run as a tray icon (Windows, Linux desktops without Argos)"""
+USAGE = """usage: claude-usage [--force | --update | --tray | --lang vi|en]
+  (none)       print the menu for SwiftBar (macOS) or Argos (GNOME)
+  --force      probe every account now, ignoring the cache
+  --update     install the latest release over this file
+  --tray       run as a tray icon (Windows, Linux desktops without Argos)
+  --lang LANG  menu language: vi (default) or en"""
 
 
-def tray_backend(os_name: str) -> TrayBackend:
+def tray_backend(os_name: str, tr: Translator) -> TrayBackend:
     if os_name == WINDOWS:
         pass
-        return Win32TrayBackend()
+        return Win32TrayBackend(tr)
     if os_name == LINUX:
         pass
-        return GtkTrayBackend()
+        return GtkTrayBackend(tr)
     raise SystemExit("--tray is for Windows and Linux; on macOS use SwiftBar")
+
+
+def set_language(host: Host, lang: str) -> None:
+    set_conf_value(host.conf_path, "language", lang)
+
+
+def run_tray(host: Host) -> None:
+    # Services are rebuilt on every refresh so edits to the conf file (language, tokens)
+    # apply without restarting the tray.
+    services = build(host)
+    TrayController(
+        backend=tray_backend(host.os_name, services.tr),
+        build_menu=lambda force: build(host).app.menu(force=force),
+        refresh=lambda: build(host).app.refresh(),
+        update=services.updater.update,
+        restart=relaunch,
+        translator=lambda: build(host).tr,
+        set_language=lambda lang: set_language(host, lang),
+    ).run()
+
+
+def print_menu(host: Host) -> None:
+    flavor = ARGOS if "ARGOS_MENU_OPEN" in host.env else SWIFTBAR
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # the menu text is not ASCII
+    sys.stdout.write(XbarRenderer(host.self_path, flavor).render(build(host).app.menu()))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     host = Host.current()
-    services = build(host)
     if args == ["--update"]:
-        services.updater.update()
+        build(host).updater.update()
     elif args == ["--force"]:
-        services.app.refresh()
+        build(host).app.refresh()
     elif args == ["--tray"]:
-        TrayController(
-            backend=tray_backend(host.os_name),
-            build_menu=lambda force: services.app.menu(force=force),
-            refresh=services.app.refresh,
-            update=services.updater.update,
-            restart=relaunch,
-        ).run()
+        run_tray(host)
+    elif len(args) == 2 and args[0] == "--lang" and normalize_language(args[1]) in LANGUAGES:
+        set_language(host, normalize_language(args[1]))
     elif not args:
-        flavor = ARGOS if "ARGOS_MENU_OPEN" in host.env else SWIFTBAR
-        sys.stdout.write(XbarRenderer(host.self_path, flavor).render(services.app.menu()))
+        print_menu(host)
     else:
         print(USAGE, file=sys.stderr)
         return 2
     return 0
+
+
+# ---------- claude_usage/tray_gtk.py ----------
+
+"""Linux tray icon (KDE, XFCE, Cinnamon, MATE, Budgie...): Gtk 3 + Ayatana AppIndicator.
+
+GNOME uses the Argos extension instead (plain BitBar output), so this backend is for the other
+desktops. Everything that touches `gi` or `fcntl` is imported inside functions, because the
+flat plugin is also imported on macOS and Windows.
+"""
+
+
+import os
+import shutil
+import sys
+import time
+from typing import Callable, Optional, Sequence, Tuple
+
+
+GTK_LOCK_WAIT_SECONDS = 10.0
+GTK_APP_ID = "claude-usage"
+
+GTK_TEXT = {
+    "gtk_missing": {
+        VI: "Thiếu thư viện để hiện biểu tượng trên khay hệ thống (PyGObject + AyatanaAppIndicator3).\n"
+            "Cài bằng lệnh sau rồi chạy lại:\n  {command}",
+        EN: "Missing libraries for the tray icon (PyGObject + AyatanaAppIndicator3).\n"
+            "Install them with this command, then run again:\n  {command}",
+    },
+    "gtk_no_display": {
+        VI: "Không mở được màn hình (chưa có DISPLAY hoặc WAYLAND_DISPLAY). "
+            "Hãy chạy lệnh này trong phiên đăng nhập đồ hoạ.",
+        EN: "Cannot open the display (no DISPLAY or WAYLAND_DISPLAY). "
+            "Run this from a graphical session.",
+    },
+    "gtk_title": {VI: "Hạn mức Claude Code", EN: "Claude Code usage"},
+}
+
+# Install commands by package manager, for the "missing gi" message.
+GTK_INSTALL_COMMANDS: Tuple[Tuple[str, str], ...] = (
+    ("apt-get", "sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1"),
+    ("dnf", "sudo dnf install python3-gobject libayatana-appindicator-gtk3"),
+    ("pacman", "sudo pacman -S --needed python-gobject libayatana-appindicator"),
+    ("zypper", "sudo zypper install python3-gobject python3-gobject-Gdk typelib-1_0-AyatanaAppIndicator3-0_1"),
+)
+
+# Themed icon names per severity, best first. The first one the icon theme has is used; these
+# exist in Adwaita, Breeze, Yaru, Papirus and the freedesktop fallback set.
+GTK_ICON_NAMES = {
+    "critical": ("dialog-error", "dialog-error-symbolic", "emblem-important"),
+    "warning": ("dialog-warning", "dialog-warning-symbolic", "dialog-error"),
+    "update": ("software-update-available", "software-update-available-symbolic",
+               "dialog-information"),
+    "normal": ("utilities-system-monitor", "utilities-system-monitor-symbolic",
+               "dialog-information", "dialog-information-symbolic"),
+}
+
+
+def gtk_severity(menu: Menu) -> str:
+    """"critical" | "warning" | "update" | "normal": what the icon should signal."""
+    if menu.title_color == RED:
+        return "critical"
+    if menu.title_color == ORANGE:
+        return "warning"
+    if menu.update_available:
+        return "update"
+    return "normal"
+
+
+def gtk_pick_icon(severity: str, has_icon: Callable[[str], bool]) -> str:
+    """The first icon for `severity` that the theme has, else the first candidate."""
+    names = GTK_ICON_NAMES.get(severity, GTK_ICON_NAMES["normal"])
+    for name in names:
+        if has_icon(name):
+            return name
+    return names[0]
+
+
+def gtk_install_command(which: Optional[Callable[[str], Optional[str]]] = None) -> str:
+    """The install command for this distro's package manager (all of them if none is found)."""
+    which = which or shutil.which
+    for tool, command in GTK_INSTALL_COMMANDS:
+        if which(tool):
+            return command
+    return "\n  ".join(command for _, command in GTK_INSTALL_COMMANDS)
+
+
+def gtk_menu_label(text: str) -> str:
+    """Escape underscores: AppIndicator menus (dbusmenu) treat them as mnemonics."""
+    return text.replace("_", "__")
+
+
+def gtk_lock_path(home: Optional[str] = None) -> str:
+    return os.path.join(home or os.path.expanduser("~"), ".cache", "claude-usage", "tray.lock")
+
+
+def gtk_acquire_lock(path: str, wait_seconds: float = GTK_LOCK_WAIT_SECONDS,
+                     sleep: Callable[[float], None] = time.sleep,
+                     clock: Callable[[], float] = time.monotonic) -> Optional[int]:
+    """An fd holding an exclusive flock on `path`, or None if another tray kept it for
+    `wait_seconds`. Waiting matters: a self-update starts the new tray right before the old
+    one quits. Keep the fd open for the life of the process."""
+    import fcntl
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)  # not inherited by children (PEP 446)
+    deadline = clock() + wait_seconds
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if clock() >= deadline:
+                os.close(fd)
+                return None
+            sleep(0.25)
+            continue
+        os.ftruncate(fd, 0)
+        os.write(fd, ("%d\n" % os.getpid()).encode())
+        return fd
+
+
+def gtk_require_versions() -> str:
+    """Check that Gtk 3 and an AppIndicator typelib exist, without loading Gtk (loading it
+    connects to the display). Returns the AppIndicator namespace; raises ImportError or
+    ValueError when something is missing."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    for namespace in ("AyatanaAppIndicator3", "AppIndicator3"):
+        try:
+            gi.require_version(namespace, "0.1")
+            return namespace
+        except ValueError:
+            pass
+    raise ValueError("no AppIndicator3 typelib")
+
+
+def gtk_load_modules() -> Tuple[object, object, object]:
+    """(Gtk, GLib, AppIndicator) or raise ImportError/ValueError when something is missing."""
+    import importlib
+
+    indicator_module = importlib.import_module("gi.repository." + gtk_require_versions())
+    from gi.repository import GLib, Gtk
+    return Gtk, GLib, indicator_module
+
+
+class GtkTrayBackend(TrayBackend):
+    """AppIndicator (StatusNotifierItem) tray icon: the label shows the menu title, the icon
+    shows the severity, and the menu is rebuilt on every show()."""
+
+    def __init__(self, tr: Optional[Translator] = None, lock_path: Optional[str] = None,
+                 lock_wait: float = GTK_LOCK_WAIT_SECONDS):
+        self._tr = (tr or Translator()).with_catalog(GTK_TEXT)
+        try:
+            gtk_require_versions()  # fail fast, before waiting for the lock
+        except (ImportError, ValueError):
+            self._exit_missing_gi()
+        self._gtk = self._glib = self._appindicator = None
+        self._lock_path = lock_path or gtk_lock_path()
+        self._lock_wait = lock_wait
+        self._lock_fd: Optional[int] = None
+        self._indicator = None
+        self._handler: Callable[[Action], None] = lambda action: None
+        self._shown: Optional[Tuple[Sequence[MenuItem], str]] = None
+
+    # ---------- TrayBackend ----------
+
+    def run(self, on_start: Callable[[], None]) -> None:
+        self._lock_fd = gtk_acquire_lock(self._lock_path, self._lock_wait)
+        if self._lock_fd is None:
+            raise SystemExit(0)  # another tray is already running
+        try:  # loaded only now, so a second instance exits without touching the display
+            self._gtk, self._glib, self._appindicator = gtk_load_modules()
+        except (ImportError, ValueError):
+            self._exit_missing_gi()
+        Gtk = self._gtk
+        if not Gtk.init_check(sys.argv)[0]:
+            print(self._tr("gtk_no_display"), file=sys.stderr)
+            raise SystemExit(1)
+        ind = self._appindicator
+        self._indicator = ind.Indicator.new(GTK_APP_ID, gtk_pick_icon("normal", self._has_icon),
+                                            ind.IndicatorCategory.APPLICATION_STATUS)
+        self._indicator.set_title(self._tr("gtk_title"))
+        self._indicator.set_status(ind.IndicatorStatus.ACTIVE)
+        self._indicator.set_menu(self._build_gtk_menu(()))  # AppIndicator needs a menu to show
+        self._install_signal_handlers()
+        on_start()
+        Gtk.main()
+
+    def show(self, menu: Menu) -> None:
+        icon = gtk_pick_icon(gtk_severity(menu), self._has_icon)
+        self._indicator.set_icon_full(icon, menu.title)
+        self._indicator.set_label(menu.title, menu.title)
+        self._indicator.set_title("%s: %s" % (self._tr("gtk_title"), menu.title))
+        if self._shown != (menu.items, icon):  # rebuilding closes an open menu, so skip if same
+            self._shown = (menu.items, icon)
+            self._indicator.set_menu(self._build_gtk_menu(menu.items))
+
+    def set_action_handler(self, handler: Callable[[Action], None]) -> None:
+        self._handler = handler
+
+    def call_soon(self, fn: Callable[[], None]) -> None:
+        def once():
+            self._safely(fn)
+            return False  # run once
+        self._glib.idle_add(once)
+
+    def every(self, seconds: int, fn: Callable[[], None]) -> None:
+        def tick():
+            self._safely(fn)
+            return True  # keep repeating even if fn failed
+        self._glib.timeout_add_seconds(seconds, tick)
+
+    def quit(self) -> None:
+        self._gtk.main_quit()
+
+    # ---------- helpers ----------
+
+    def _exit_missing_gi(self) -> None:
+        print(self._tr("gtk_missing", command=gtk_install_command()), file=sys.stderr)
+        raise SystemExit(1)
+
+    def _has_icon(self, name: str) -> bool:
+        theme = self._gtk.IconTheme.get_default()
+        return bool(theme and theme.has_icon(name))
+
+    def _build_gtk_menu(self, items: Sequence[MenuItem]):
+        Gtk = self._gtk
+        gtk_menu = Gtk.Menu()
+        for item in items:
+            if item.separator:
+                gtk_menu.append(Gtk.SeparatorMenuItem())
+                continue
+            widget = Gtk.MenuItem.new_with_mnemonic(gtk_menu_label(item.text))
+            if item.action is None:
+                widget.set_sensitive(False)
+            else:
+                widget.connect("activate", lambda _w, a=item.action: self._dispatch(a))
+            gtk_menu.append(widget)
+        gtk_menu.show_all()
+        return gtk_menu
+
+    def _dispatch(self, action: Action) -> None:
+        self._safely(lambda: self._handler(action))
+
+    def _install_signal_handlers(self) -> None:
+        import signal
+
+        unix_signal_add = getattr(self._glib, "unix_signal_add", None)
+        if unix_signal_add is None:
+            return
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            unix_signal_add(self._glib.PRIORITY_DEFAULT, sig, self._on_signal)
+
+    def _on_signal(self, *_args) -> bool:
+        self.quit()
+        return False
+
+    @staticmethod
+    def _safely(fn: Callable[[], None]) -> None:
+        """A raising GLib callback would drop the timer or kill the update; log and go on."""
+        try:
+            fn()
+        except Exception as e:  # keep the icon alive whatever happens
+            print("claude-usage tray: %s: %s" % (type(e).__name__, e), file=sys.stderr)
+
+
+# ---------- claude_usage/tray_win32.py ----------
+
+"""Windows tray icon: a hidden window plus Shell_NotifyIconW, stdlib ctypes only.
+
+Win32TrayBackend holds the behaviour (what the icon shows, what a click does, timers, the
+single-instance rule); _Win32Api is the thin ctypes layer it talks to. Everything that needs
+Windows is loaded when _Win32Api is created, never at import time, because this module is also
+part of the single-file plugin that runs on macOS and Linux.
+"""
+
+
+import collections
+import sys
+import time
+import traceback
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
+
+
+class _W32:
+    """The Win32 constants used here (winuser.h, shellapi.h, wingdi.h, winerror.h)."""
+    WM_NULL = 0x0000
+    WM_CLOSE = 0x0010
+    WM_TIMER = 0x0113
+    WM_LBUTTONUP = 0x0202
+    WM_RBUTTONUP = 0x0205
+    WM_APP = 0x8000
+    NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
+    NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x1, 0x2, 0x4
+    MF_STRING, MF_GRAYED, MF_SEPARATOR = 0x0, 0x1, 0x800
+    TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD = 0x2, 0x80, 0x100
+    SM_CXSMICON = 49
+    BI_RGB, DIB_RGB_COLORS = 0, 0
+    FW_BOLD, DEFAULT_CHARSET, ANTIALIASED_QUALITY, FF_SWISS = 700, 1, 4, 0x20
+    TRANSPARENT = 1
+    DT_CENTER, DT_VCENTER, DT_SINGLELINE, DT_NOPREFIX = 0x1, 0x4, 0x20, 0x800
+    ERROR_ALREADY_EXISTS = 183
+
+
+Win32Rgb = Tuple[int, int, int]
+Win32MenuEntry = Tuple[int, int, str]  # (MF_* flags, command id or 0, label)
+
+WIN32_TIP_MAX = 127                    # szTip holds 128 UTF-16 units including the NUL
+WIN32_TEXT_RGB: Win32Rgb = (0xFF, 0xFF, 0xFF)
+WIN32_NEUTRAL_RGB: Win32Rgb = (0x45, 0x5A, 0x64)
+WIN32_ALERT_RGB = {RED: (0xC6, 0x28, 0x28), ORANGE: (0xE6, 0x5C, 0x00)}
+
+# Strings of this frontend only; menu text arrives already translated in the Menu.
+WIN32_TEXT = {
+    "win32_tip_starting": {VI: "Claude: đang khởi động...", EN: "Claude: starting..."},
+}
+
+
+# ---------- pure helpers (tested on every OS) ----------
+
+def win32_tooltip(title: str) -> str:
+    """The tray tooltip: the menu title cut to what szTip can hold."""
+    tip = title.replace("\0", "")[:WIN32_TIP_MAX]
+    while len(tip.encode("utf-16-le")) // 2 > WIN32_TIP_MAX:  # characters outside the BMP
+        tip = tip[:-1]
+    return tip
+
+
+def win32_icon_text(worst: Optional[float]) -> str:
+    """The number drawn on the icon: the worst percentage, or "?" when nothing is known."""
+    return "?" if worst is None else "%d" % round(worst)
+
+
+def win32_icon_colors(title_color: Optional[str]) -> Tuple[Win32Rgb, Win32Rgb]:
+    """(background, text) colors: red or orange when a limit is close, neutral otherwise."""
+    return WIN32_ALERT_RGB.get(title_color, WIN32_NEUTRAL_RGB), WIN32_TEXT_RGB
+
+
+def win32_font_height(size: int, text: str) -> int:
+    """Digit height in pixels so that up to three digits fit an icon of `size` pixels."""
+    scale = {1: 0.9, 2: 0.8}.get(len(text), 0.6)
+    return max(6, int(round(size * scale)))
+
+
+def win32_icon_mask(size: int) -> List[bool]:
+    """Row-major opacity of a rounded square filling a size x size icon."""
+    radius = max(1, size // 5)
+    mask = []
+    for y in range(size):
+        for x in range(size):
+            # distance from the nearest corner circle center, zero away from the corners
+            dx = max(radius - x - 0.5, x + 0.5 - (size - radius), 0)
+            dy = max(radius - y - 0.5, y + 0.5 - (size - radius), 0)
+            mask.append(dx * dx + dy * dy <= radius * radius)
+    return mask
+
+
+def win32_argb(rgb: Win32Rgb, alpha: int = 0xFF) -> int:
+    """A 32bpp DIB pixel (bytes B, G, R, A in memory)."""
+    r, g, b = rgb
+    return (alpha << 24) | (r << 16) | (g << 8) | b
+
+
+def win32_colorref(rgb: Win32Rgb) -> int:
+    """A GDI COLORREF (0x00BBGGRR)."""
+    r, g, b = rgb
+    return r | (g << 8) | (b << 16)
+
+
+def win32_menu_label(text: str) -> str:
+    """Menus read & as a mnemonic marker and a tab as the accelerator column."""
+    return text.replace("&", "&&").replace("\t", " ")
+
+
+def win32_menu_entries(items: Sequence[MenuItem]) -> Tuple[List[Win32MenuEntry], Dict[int, Action]]:
+    """Popup menu rows and the Action behind each command id. Items with an action get ids
+    1, 2, 3...; items without one are shown grayed and cannot be chosen."""
+    entries: List[Win32MenuEntry] = []
+    actions: Dict[int, Action] = {}
+    for item in items:
+        if item.separator:
+            entries.append((_W32.MF_SEPARATOR, 0, ""))
+        elif item.action is not None:
+            command = len(actions) + 1
+            actions[command] = item.action
+            entries.append((_W32.MF_STRING, command, win32_menu_label(item.text)))
+        else:
+            entries.append((_W32.MF_STRING | _W32.MF_GRAYED, 0, win32_menu_label(item.text)))
+    return entries, actions
+
+
+def _w32_report_error() -> None:
+    """Print the current exception if there is a console (pythonw has no stderr)."""
+    if sys.stderr is not None:
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+
+
+# ---------- behaviour ----------
+
+class Win32TrayBackend(TrayBackend):
+    """A notification-area icon showing the worst percentage, with the menu on click."""
+
+    MUTEX_NAME = "Local\\claude-usage-bar-tray"
+    WAIT_FOR_OTHER_SECONDS = 10.0  # a self-update starts the new tray just before the old quits
+    WM_WAKE = _W32.WM_APP + 1      # call_soon has queued work
+    WM_TRAY = _W32.WM_APP + 2      # mouse events on the icon
+    ICON_ID = 1
+
+    def __init__(self, tr: Optional[Translator] = None, api=None, mutex_name: str = MUTEX_NAME,
+                 wait_seconds: float = WAIT_FOR_OTHER_SECONDS,
+                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic):
+        self._tr = (tr or Translator()).with_catalog(WIN32_TEXT)
+        self._api = api if api is not None else _Win32Api()
+        self._mutex_name = mutex_name
+        self._wait_seconds = wait_seconds
+        self._sleep = sleep
+        self._clock = clock
+        self._queue: Deque[Callable[[], None]] = collections.deque()
+        self._handler: Optional[Callable[[Action], None]] = None
+        self._timers: Dict[int, Callable[[], None]] = {}
+        self._intervals: Dict[int, int] = {}  # timer id -> milliseconds
+        self._hwnd = None
+        self._menu: Optional[Menu] = None
+        self._hicon = None
+        self._icon_added = False
+        self._taskbar_created = 0
+        self._menu_open = False
+        self._quitting = False
+
+    # TrayBackend
+
+    def run(self, on_start: Callable[[], None]) -> None:
+        mutex = self._acquire_single_instance()
+        if mutex is None:
+            return  # another tray is running: leave quietly
+        try:
+            self._hwnd = self._api.create_window(self._on_message)
+            self._taskbar_created = self._api.register_message("TaskbarCreated")
+            for timer_id, seconds in self._pending_timers():
+                self._api.set_timer(self._hwnd, timer_id, seconds)
+            self._api.post(self._hwnd, self.WM_WAKE)  # run anything queued before the window
+            on_start()
+            self._api.run_loop()
+        finally:
+            self._teardown()
+            self._api.close_handle(mutex)
+
+    def show(self, menu: Menu) -> None:
+        if self._quitting:
+            return  # a refresh that finished after quit
+        self._menu = menu
+        old_icon = self._hicon
+        background, text = win32_icon_colors(menu.title_color)
+        self._hicon = self._api.create_icon(win32_icon_text(menu.worst), background, text)
+        self._sync_icon()
+        if old_icon:
+            self._api.destroy_icon(old_icon)  # only after Explorer has the new one
+
+    def set_action_handler(self, handler: Callable[[Action], None]) -> None:
+        self._handler = handler
+
+    def call_soon(self, fn: Callable[[], None]) -> None:
+        self._queue.append(fn)  # deque.append is atomic; append before reading _hwnd
+        hwnd = self._hwnd
+        if hwnd is not None:
+            self._api.post(hwnd, self.WM_WAKE)
+
+    def every(self, seconds: int, fn: Callable[[], None]) -> None:
+        timer_id = len(self._timers) + 1
+        self._timers[timer_id] = fn
+        self._intervals[timer_id] = int(seconds * 1000)
+        if self._hwnd is not None:
+            self._api.set_timer(self._hwnd, timer_id, self._intervals[timer_id])
+
+    def quit(self) -> None:
+        if self._quitting:
+            return
+        self._quitting = True
+        self._remove_icon()
+        self._api.post_quit()
+
+    # window messages
+
+    def _on_message(self, msg: int, wparam: int, lparam: int) -> Optional[int]:
+        """Handle a window message; None means "let DefWindowProc handle it"."""
+        if msg == self.WM_WAKE:
+            self._drain_queue()
+        elif msg == self.WM_TRAY:
+            if lparam & 0xFFFF in (_W32.WM_LBUTTONUP, _W32.WM_RBUTTONUP):
+                self._open_menu()
+        elif msg == _W32.WM_TIMER and wparam in self._timers:
+            self._safely(self._timers[wparam])
+        elif self._taskbar_created and msg == self._taskbar_created:
+            self._icon_added = False  # Explorer restarted and forgot every icon
+            self._sync_icon()
+        elif msg == _W32.WM_CLOSE:
+            self.quit()
+        else:
+            return None
+        return 0
+
+    def _drain_queue(self) -> None:
+        while self._queue:
+            self._safely(self._queue.popleft())
+
+    def _open_menu(self) -> None:
+        if self._menu is None or self._menu_open or self._quitting:
+            return
+        entries, actions = win32_menu_entries(self._menu.items)
+        self._menu_open = True
+        try:
+            command = self._api.popup_menu(self._hwnd, entries)
+        finally:
+            self._menu_open = False
+        action = actions.get(command)
+        handler = self._handler
+        if action is not None and handler is not None:
+            self._safely(lambda: handler(action))
+
+    # icon
+
+    def _sync_icon(self) -> None:
+        """Add or update the notification-area icon. Failure is not fatal: at logon Explorer
+        may not be ready yet, and TaskbarCreated tells us when to try again."""
+        if self._hwnd is None or self._quitting:
+            return
+        tip = win32_tooltip(self._menu.title if self._menu else self._tr("win32_tip_starting"))
+        if self._icon_added and self._notify(_W32.NIM_MODIFY, tip):
+            return
+        self._icon_added = self._notify(_W32.NIM_ADD, tip)
+
+    def _notify(self, operation: int, tip: str = "") -> bool:
+        return self._api.notify(operation, self._hwnd, self.ICON_ID, self.WM_TRAY, self._hicon, tip)
+
+    def _remove_icon(self) -> None:
+        for timer_id in self._timers:
+            if self._hwnd is not None:
+                self._api.kill_timer(self._hwnd, timer_id)
+        if self._icon_added:
+            self._notify(_W32.NIM_DELETE)
+            self._icon_added = False
+        if self._hicon:
+            self._api.destroy_icon(self._hicon)
+            self._hicon = None
+
+    # lifecycle
+
+    def _acquire_single_instance(self):
+        """The named mutex handle, or None if another tray still holds it after waiting."""
+        deadline = self._clock() + self._wait_seconds
+        while True:
+            handle, already_running = self._api.create_mutex(self._mutex_name)
+            if not already_running:
+                return handle or 0  # 0: the mutex could not be created, run anyway
+            self._api.close_handle(handle)
+            if self._clock() >= deadline:
+                return None
+            self._sleep(0.25)
+
+    def _pending_timers(self) -> List[Tuple[int, int]]:
+        return sorted(self._intervals.items())
+
+    def _teardown(self) -> None:
+        if not self._quitting:
+            self._quitting = True
+            self._remove_icon()
+        if self._hwnd is not None:
+            self._api.destroy_window(self._hwnd)
+            self._hwnd = None
+
+    @staticmethod
+    def _safely(fn: Callable[[], None]) -> None:
+        """Run a callback without letting an exception unwind into the Win32 message loop."""
+        try:
+            fn()
+        except Exception:
+            _w32_report_error()
+
+
+# ---------- ctypes layer (Windows only) ----------
+
+class _Win32Api:
+    """Thin ctypes wrapper over user32, gdi32, shell32 and kernel32. Loads the DLLs on
+    creation, so create it only on Windows. Every function that takes or returns a handle
+    has argtypes and restype set, which 64-bit Python needs."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        self._ct = ctypes
+        self._wt = wintypes
+        self._define_types()
+        self._bind_functions()
+        self._hinstance = self.fn.GetModuleHandleW(None)
+        self._class_name = ""
+        self._wndproc = None  # must outlive the window: Windows calls it until DestroyWindow
+
+    # setup
+
+    def _define_types(self) -> None:
+        ct, wt = self._ct, self._wt
+        self.LRESULT = wt.LPARAM
+        self.WNDPROC = ct.WINFUNCTYPE(self.LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+        class WNDCLASSW(ct.Structure):
+            _fields_ = [("style", wt.UINT), ("lpfnWndProc", self.WNDPROC),
+                        ("cbClsExtra", ct.c_int), ("cbWndExtra", ct.c_int),
+                        ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
+                        ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH),
+                        ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
+
+        class GUID(ct.Structure):
+            _fields_ = [("Data1", wt.DWORD), ("Data2", wt.WORD), ("Data3", wt.WORD),
+                        ("Data4", wt.BYTE * 8)]
+
+        class NOTIFYICONDATAW(ct.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND), ("uID", wt.UINT),
+                        ("uFlags", wt.UINT), ("uCallbackMessage", wt.UINT),
+                        ("hIcon", wt.HICON), ("szTip", wt.WCHAR * 128),
+                        ("dwState", wt.DWORD), ("dwStateMask", wt.DWORD),
+                        ("szInfo", wt.WCHAR * 256), ("uVersion", wt.UINT),
+                        ("szInfoTitle", wt.WCHAR * 64), ("dwInfoFlags", wt.DWORD),
+                        ("guidItem", GUID), ("hBalloonIcon", wt.HICON)]
+
+        class BITMAPINFOHEADER(ct.Structure):
+            _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
+                        ("biPlanes", wt.WORD), ("biBitCount", wt.WORD),
+                        ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD),
+                        ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG),
+                        ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
+
+        class BITMAPINFO(ct.Structure):
+            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 1)]
+
+        class ICONINFO(ct.Structure):
+            _fields_ = [("fIcon", wt.BOOL), ("xHotspot", wt.DWORD), ("yHotspot", wt.DWORD),
+                        ("hbmMask", wt.HBITMAP), ("hbmColor", wt.HBITMAP)]
+
+        self.WNDCLASSW, self.NOTIFYICONDATAW = WNDCLASSW, NOTIFYICONDATAW
+        self.BITMAPINFOHEADER, self.BITMAPINFO, self.ICONINFO = BITMAPINFOHEADER, BITMAPINFO, ICONINFO
+
+    def _bind_functions(self) -> None:
+        ct, wt = self._ct, self._wt
+        P = ct.POINTER
+        # Private DLL objects, so argtypes set here never clash with other ctypes users.
+        user32 = ct.WinDLL("user32", use_last_error=True)
+        gdi32 = ct.WinDLL("gdi32", use_last_error=True)
+        shell32 = ct.WinDLL("shell32", use_last_error=True)
+        kernel32 = ct.WinDLL("kernel32", use_last_error=True)
+
+        class Functions:
+            pass
+
+        self.fn = Functions()
+
+        def bind(dll, name, restype, *argtypes):
+            f = getattr(dll, name)
+            f.restype = restype
+            f.argtypes = list(argtypes)
+            setattr(self.fn, name, f)
+
+        UINT_PTR = wt.WPARAM  # pointer-sized unsigned
+        bind(kernel32, "GetModuleHandleW", wt.HMODULE, wt.LPCWSTR)
+        bind(kernel32, "CreateMutexW", wt.HANDLE, wt.LPVOID, wt.BOOL, wt.LPCWSTR)
+        bind(kernel32, "CloseHandle", wt.BOOL, wt.HANDLE)
+
+        bind(user32, "SetProcessDPIAware", wt.BOOL)
+        bind(user32, "RegisterClassW", wt.ATOM, P(self.WNDCLASSW))
+        bind(user32, "UnregisterClassW", wt.BOOL, wt.LPCWSTR, wt.HINSTANCE)
+        bind(user32, "CreateWindowExW", wt.HWND, wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
+             ct.c_int, ct.c_int, ct.c_int, ct.c_int, wt.HWND, wt.HMENU, wt.HINSTANCE, wt.LPVOID)
+        bind(user32, "DestroyWindow", wt.BOOL, wt.HWND)
+        bind(user32, "DefWindowProcW", self.LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+        bind(user32, "RegisterWindowMessageW", wt.UINT, wt.LPCWSTR)
+        bind(user32, "GetMessageW", wt.BOOL, P(wt.MSG), wt.HWND, wt.UINT, wt.UINT)
+        bind(user32, "TranslateMessage", wt.BOOL, P(wt.MSG))
+        bind(user32, "DispatchMessageW", self.LRESULT, P(wt.MSG))
+        bind(user32, "PostMessageW", wt.BOOL, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+        bind(user32, "PostQuitMessage", None, ct.c_int)
+        bind(user32, "SetTimer", UINT_PTR, wt.HWND, UINT_PTR, wt.UINT, wt.LPVOID)
+        bind(user32, "KillTimer", wt.BOOL, wt.HWND, UINT_PTR)
+        bind(user32, "CreatePopupMenu", wt.HMENU)
+        bind(user32, "AppendMenuW", wt.BOOL, wt.HMENU, wt.UINT, UINT_PTR, wt.LPCWSTR)
+        bind(user32, "TrackPopupMenu", ct.c_int, wt.HMENU, wt.UINT, ct.c_int, ct.c_int,
+             ct.c_int, wt.HWND, wt.LPVOID)
+        bind(user32, "DestroyMenu", wt.BOOL, wt.HMENU)
+        bind(user32, "GetCursorPos", wt.BOOL, P(wt.POINT))
+        bind(user32, "SetForegroundWindow", wt.BOOL, wt.HWND)
+        bind(user32, "GetSystemMetrics", ct.c_int, ct.c_int)
+        bind(user32, "DrawTextW", ct.c_int, wt.HDC, wt.LPCWSTR, ct.c_int, P(wt.RECT), wt.UINT)
+        bind(user32, "CreateIconIndirect", wt.HICON, P(self.ICONINFO))
+        bind(user32, "DestroyIcon", wt.BOOL, wt.HICON)
+
+        bind(gdi32, "CreateCompatibleDC", wt.HDC, wt.HDC)
+        bind(gdi32, "DeleteDC", wt.BOOL, wt.HDC)
+        bind(gdi32, "CreateDIBSection", wt.HBITMAP, wt.HDC, P(self.BITMAPINFO), wt.UINT,
+             P(wt.LPVOID), wt.HANDLE, wt.DWORD)
+        bind(gdi32, "CreateBitmap", wt.HBITMAP, ct.c_int, ct.c_int, wt.UINT, wt.UINT, wt.LPVOID)
+        bind(gdi32, "SelectObject", wt.HGDIOBJ, wt.HDC, wt.HGDIOBJ)
+        bind(gdi32, "DeleteObject", wt.BOOL, wt.HGDIOBJ)
+        bind(gdi32, "CreateFontW", wt.HFONT, ct.c_int, ct.c_int, ct.c_int, ct.c_int, ct.c_int,
+             wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD, wt.DWORD,
+             wt.LPCWSTR)
+        bind(gdi32, "SetBkMode", ct.c_int, wt.HDC, ct.c_int)
+        bind(gdi32, "SetTextColor", wt.DWORD, wt.HDC, wt.DWORD)
+        bind(gdi32, "GdiFlush", wt.BOOL)
+
+        bind(shell32, "Shell_NotifyIconW", wt.BOOL, wt.DWORD, P(self.NOTIFYICONDATAW))
+
+    def _raise_last_error(self, what: str):
+        error = self._ct.get_last_error()
+        raise OSError(error, "%s failed (Win32 error %d)" % (what, error))
+
+    # window and message loop
+
+    def create_window(self, on_message: Callable[[int, int, int], Optional[int]]):
+        """A hidden top-level window (a message-only window would miss TaskbarCreated)."""
+        ct, f = self._ct, self.fn
+        f.SetProcessDPIAware()  # crisp icon and menu on scaled displays
+
+        def wndproc(hwnd, msg, wparam, lparam):
+            try:
+                result = on_message(msg, wparam, lparam)
+            except Exception:
+                _w32_report_error()
+                result = None
+            return f.DefWindowProcW(hwnd, msg, wparam, lparam) if result is None else result
+
+        self._wndproc = self.WNDPROC(wndproc)
+        self._class_name = "ClaudeUsageBarTray%x" % id(self)
+        wc = self.WNDCLASSW()
+        wc.lpfnWndProc = self._wndproc
+        wc.hInstance = self._hinstance
+        wc.lpszClassName = self._class_name
+        if not f.RegisterClassW(ct.byref(wc)):
+            self._raise_last_error("RegisterClassW")
+        hwnd = f.CreateWindowExW(0, self._class_name, "claude-usage-bar", 0, 0, 0, 0, 0,
+                                 None, None, self._hinstance, None)
+        if not hwnd:
+            self._raise_last_error("CreateWindowExW")
+        return hwnd
+
+    def destroy_window(self, hwnd) -> None:
+        self.fn.DestroyWindow(hwnd)
+        self.fn.UnregisterClassW(self._class_name, self._hinstance)
+
+    def register_message(self, name: str) -> int:
+        return self.fn.RegisterWindowMessageW(name)
+
+    def run_loop(self) -> None:
+        ct, f = self._ct, self.fn
+        msg = self._wt.MSG()
+        while True:
+            result = f.GetMessageW(ct.byref(msg), None, 0, 0)
+            if result == 0:  # WM_QUIT
+                return
+            if result == -1:
+                self._raise_last_error("GetMessageW")
+            f.TranslateMessage(ct.byref(msg))
+            f.DispatchMessageW(ct.byref(msg))
+
+    def post(self, hwnd, msg: int) -> bool:
+        return bool(self.fn.PostMessageW(hwnd, msg, 0, 0))
+
+    def post_quit(self) -> None:
+        self.fn.PostQuitMessage(0)
+
+    def set_timer(self, hwnd, timer_id: int, milliseconds: int) -> None:
+        self.fn.SetTimer(hwnd, timer_id, milliseconds, None)
+
+    def kill_timer(self, hwnd, timer_id: int) -> None:
+        self.fn.KillTimer(hwnd, timer_id)
+
+    # single instance
+
+    def create_mutex(self, name: str):
+        """(handle, True if the mutex already existed)."""
+        self._ct.set_last_error(0)
+        handle = self.fn.CreateMutexW(None, False, name)
+        return handle, self._ct.get_last_error() == _W32.ERROR_ALREADY_EXISTS
+
+    def close_handle(self, handle) -> None:
+        if handle:
+            self.fn.CloseHandle(handle)
+
+    # notification icon
+
+    def notify(self, operation: int, hwnd, icon_id: int, callback_msg: int, hicon, tip: str) -> bool:
+        data = self.NOTIFYICONDATAW()
+        data.cbSize = self._ct.sizeof(data)
+        data.hWnd = hwnd
+        data.uID = icon_id
+        if operation != _W32.NIM_DELETE:
+            data.uFlags = _W32.NIF_MESSAGE | _W32.NIF_ICON | _W32.NIF_TIP
+            data.uCallbackMessage = callback_msg
+            data.hIcon = hicon
+            data.szTip = tip
+        return bool(self.fn.Shell_NotifyIconW(operation, self._ct.byref(data)))
+
+    def create_icon(self, text: str, background: Win32Rgb, foreground: Win32Rgb):
+        """An HICON with `text` in white on a rounded square, sized for the tray."""
+        ct, f = self._ct, self.fn
+        size = f.GetSystemMetrics(_W32.SM_CXSMICON) or 16
+        mask = win32_icon_mask(size)
+        color_bitmap, pixels = self._create_dib(size)
+        fill = win32_argb(background)
+        for i, opaque in enumerate(mask):
+            pixels[i] = fill if opaque else 0
+        self._draw_text(color_bitmap, size, text, foreground)
+        for i, opaque in enumerate(mask):  # GDI text clears alpha: make the square opaque again
+            pixels[i] = (pixels[i] & 0xFFFFFF) | 0xFF000000 if opaque else 0
+        mask_bits = (ct.c_ubyte * (((size + 15) // 16) * 2 * size))()  # zeroed, unused with alpha
+        mask_bitmap = f.CreateBitmap(size, size, 1, 1, mask_bits)
+        info = self.ICONINFO(True, 0, 0, mask_bitmap, color_bitmap)
+        hicon = f.CreateIconIndirect(ct.byref(info))
+        f.DeleteObject(mask_bitmap)
+        f.DeleteObject(color_bitmap)
+        if not hicon:
+            self._raise_last_error("CreateIconIndirect")
+        return hicon
+
+    def _create_dib(self, size: int):
+        """A top-down 32bpp bitmap and a ctypes view of its pixels."""
+        ct, f = self._ct, self.fn
+        bmi = self.BITMAPINFO()
+        header = bmi.bmiHeader
+        header.biSize = ct.sizeof(self.BITMAPINFOHEADER)
+        header.biWidth, header.biHeight = size, -size
+        header.biPlanes, header.biBitCount, header.biCompression = 1, 32, _W32.BI_RGB
+        bits = self._wt.LPVOID()
+        bitmap = f.CreateDIBSection(None, ct.byref(bmi), _W32.DIB_RGB_COLORS, ct.byref(bits), None, 0)
+        if not bitmap or not bits.value:
+            self._raise_last_error("CreateDIBSection")
+        return bitmap, (ct.c_uint32 * (size * size)).from_address(bits.value)
+
+    def _draw_text(self, bitmap, size: int, text: str, foreground: Win32Rgb) -> None:
+        ct, f = self._ct, self.fn
+        dc = f.CreateCompatibleDC(None)
+        old_bitmap = f.SelectObject(dc, bitmap)
+        font = f.CreateFontW(-win32_font_height(size, text), 0, 0, 0, _W32.FW_BOLD, 0, 0, 0,
+                             _W32.DEFAULT_CHARSET, 0, 0, _W32.ANTIALIASED_QUALITY, _W32.FF_SWISS,
+                             "Segoe UI")
+        old_font = f.SelectObject(dc, font)
+        f.SetBkMode(dc, _W32.TRANSPARENT)
+        f.SetTextColor(dc, win32_colorref(foreground))
+        rect = self._wt.RECT(0, 0, size, size)
+        f.DrawTextW(dc, text, -1, ct.byref(rect),
+                    _W32.DT_CENTER | _W32.DT_VCENTER | _W32.DT_SINGLELINE | _W32.DT_NOPREFIX)
+        f.GdiFlush()
+        f.SelectObject(dc, old_font)
+        f.DeleteObject(font)
+        f.SelectObject(dc, old_bitmap)
+        f.DeleteDC(dc)
+
+    def destroy_icon(self, hicon) -> None:
+        self.fn.DestroyIcon(hicon)
+
+    # popup menu
+
+    def popup_menu(self, hwnd, entries: Sequence[Win32MenuEntry]) -> int:
+        """Show the menu at the cursor and return the chosen command id (0 if dismissed)."""
+        ct, f = self._ct, self.fn
+        menu = f.CreatePopupMenu()
+        try:
+            for flags, command, label in entries:
+                f.AppendMenuW(menu, flags, command, None if flags & _W32.MF_SEPARATOR else label)
+            point = self._wt.POINT()
+            f.GetCursorPos(ct.byref(point))
+            f.SetForegroundWindow(hwnd)  # otherwise the menu does not close on an outside click
+            command = f.TrackPopupMenu(menu, _W32.TPM_RIGHTBUTTON | _W32.TPM_RETURNCMD
+                                       | _W32.TPM_NONOTIFY, point.x, point.y, 0, hwnd, None)
+            f.PostMessageW(hwnd, _W32.WM_NULL, 0, 0)
+            return command
+        finally:
+            f.DestroyMenu(menu)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,26 @@
+Claude 20% |
+---
+A: claude-a1 - token | size=13
+5-hour: 10%  (resets in 1h 1m)
+Weekly: 20%  (resets in 1d)
+---
+A2: claude-a2 - token | size=13
+5-hour: 10%  (resets in 1h 1m)
+Weekly: 20%  (resets in 1d)
+---
+A3: claude-a3 - token | size=13
+5-hour: 10%  (resets in 1h 1m)
+Weekly: 20%  (resets in 1d)
+---
+B: claude-b1 - token | size=13
+5-hour: 10%  (resets in 3h)
+Weekly: 20%  (resets in 3d)
+Old numbers, the last refresh failed | color=gray size=11
+Error: RuntimeError: no rate-limit headers | color=gray size=11
+---
+Refreshes every 3 minutes | color=gray size=11
+Numbers: % of 5-hour / weekly / Fable weekly limit | color=gray size=11
+Version v<VERSION> | color=gray size=11 href=https://github.com/Kong-Travis/claude-usage-bar
+Support the author | href=https://github.com/Kong-Travis/claude-usage-bar#support
+Chuyển sang tiếng Việt | bash="<SELF>" param1=--lang param2=vi terminal=false refresh=true
+Refresh now | bash="<SELF>" param1=--force terminal=false refresh=true

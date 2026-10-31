@@ -12,6 +12,7 @@ from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 from .config import KEYCHAIN_SERVICE
 from .domain import Account, AccountSource, Clock, LoginExpired, TokenAccount
+from .i18n import Translator, normalize_language
 from .scan import ShellScanner, expand_path, read_token_file, token_in_text
 
 POSIX_RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".profile")
@@ -33,13 +34,15 @@ class UserConfig:
     """~/.config/claude-usage.conf, one entry per line:
         label = /path/to/token-file     add a token the scan cannot find
         keychain = off                  hide browser logins (keychain and credentials files)
+        language = en                   English menus (default: vi, Vietnamese)
     """
     token_files: Tuple[Tuple[str, str], ...] = ()
     show_logins: bool = True
+    language: Optional[str] = None
 
     @classmethod
     def load(cls, path: str, home: str) -> UserConfig:
-        token_files, show_logins = [], True
+        token_files, show_logins, language = [], True, None
         try:
             with open(path, encoding="utf-8", errors="ignore") as f:
                 lines = f.read().splitlines()
@@ -52,9 +55,37 @@ class UserConfig:
             key, val = (s.strip() for s in line.split("=", 1))
             if key in ("keychain", "logins"):
                 show_logins = val.lower() not in ("off", "no", "false", "0")
+            elif key == "language":
+                language = normalize_language(val)
             elif val:
                 token_files.append((key, expand_path(val, home)))
-        return cls(tuple(token_files), show_logins)
+        return cls(tuple(token_files), show_logins, language)
+
+
+def set_conf_value(path: str, key: str, value: str) -> None:
+    """Set `key = value` in the conf file, replacing an existing line for key and keeping
+    every other line (comments included)."""
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    new_line = "%s = %s" % (key, value)
+    out, done = [], False
+    for line in lines:
+        if line.split("#", 1)[0].split("=", 1)[0].strip() == key and "=" in line:
+            if not done:
+                out.append(new_line)
+                done = True
+            continue
+        out.append(line)
+    if not done:
+        out.append(new_line)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.replace(tmp, path)
 
 
 # ---------- macOS keychain ----------
@@ -117,10 +148,11 @@ class CredentialsFileAccount(Account):
     """A browser login stored in <config dir>/.credentials.json."""
     is_login = True
 
-    def __init__(self, path: str, clock: Clock):
+    def __init__(self, path: str, clock: Clock, tr: Translator):
         super().__init__(config_dir_label(os.path.dirname(path)))
         self.path = path
         self._clock = clock
+        self._tr = tr
 
     @property
     def identity(self) -> str:
@@ -136,7 +168,7 @@ class CredentialsFileAccount(Account):
 
     def token(self) -> str:
         if self.expired():
-            raise LoginExpired("đăng nhập đã hết hạn, mở `claude` một lần để làm mới")
+            raise LoginExpired(self._tr("login_expired"))
         return self.oauth()["accessToken"]
 
 
@@ -147,10 +179,12 @@ class CredentialsFileSource:
     often left behind expired, so expired files are hidden there.
     """
 
-    def __init__(self, config_dirs: Callable[[], Iterable[str]], clock: Clock, skip_expired: bool):
+    def __init__(self, config_dirs: Callable[[], Iterable[str]], clock: Clock, skip_expired: bool,
+                 tr: Translator):
         self._config_dirs = config_dirs
         self._clock = clock
         self._skip_expired = skip_expired
+        self._tr = tr
 
     def accounts(self) -> List[Account]:
         result: List[Account] = []
@@ -158,7 +192,7 @@ class CredentialsFileSource:
             path = os.path.join(d, CREDENTIALS_FILE)
             if not os.path.isfile(path):
                 continue
-            acc = CredentialsFileAccount(path, self._clock)
+            acc = CredentialsFileAccount(path, self._clock, self._tr)
             try:
                 if self._skip_expired and acc.expired():
                     continue

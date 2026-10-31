@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tests/test_bundle.py runs the v1.2.2 updater from its git tag
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"  # macOS ships 3.9.6 as /usr/bin/python3
+      - name: Bundle is up to date with src/
+        run: python tools/bundle.py --check
+      - name: Unit, golden and compatibility tests
+        working-directory: tests
+        run: python -m unittest discover -p "test_*.py" -v

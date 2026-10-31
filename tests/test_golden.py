@@ -80,14 +80,14 @@ def render(name: str, *args: str, plugin: str | None = None, extra_env=None) -> 
 
 
 class GoldenSwiftBar(unittest.TestCase):
-    def check(self, name: str):
-        got = render(name)
-        path = os.path.join(GOLDEN, "swiftbar_%s.txt" % name)
+    def check(self, name: str, lang: str = ""):
+        got = render(name, extra_env={"CLAUDE_USAGE_LANG": lang} if lang else None)
+        path = os.path.join(GOLDEN, "swiftbar_%s%s.txt" % (name, "_" + lang if lang else ""))
         if os.environ.get("UPDATE_GOLDEN"):
             os.makedirs(GOLDEN, exist_ok=True)
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(got)
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             self.assertEqual(f.read(), got)
 
     def test_two_accounts(self):
@@ -101,6 +101,26 @@ class GoldenSwiftBar(unittest.TestCase):
 
     def test_no_accounts(self):
         self.check("no_accounts")
+
+    def test_two_accounts_english(self):
+        self.check("two_accounts", lang="en")
+
+    def test_many_accounts_and_stale_english(self):
+        self.check("many_accounts_and_stale", lang="en")
+
+
+class LanguageSwitch(unittest.TestCase):
+    def test_lang_flag_persists_in_conf_and_keeps_other_lines(self):
+        with FakeHome() as home:
+            plans, tag = scenario_two_accounts(home)
+            with FakeServer(plans, latest_tag=tag) as server:
+                self.assertEqual(run_plugin(home, server, "--lang", "en"), "")
+                self.assertIn("5-hour: 0%", run_plugin(home, server))
+                run_plugin(home, server, "--lang", "vi")
+                self.assertIn("5 giờ: 0%", run_plugin(home, server))
+            with open(os.path.join(home.path, ".config", "claude-usage.conf"), encoding="utf-8") as f:
+                conf = f.read()
+            self.assertEqual(conf, "keychain = off\nwork = ~/tokens/work.txt\nlanguage = vi\n")
 
 
 if __name__ == "__main__":
