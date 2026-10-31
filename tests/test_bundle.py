@@ -95,6 +95,7 @@ class OldReleaseCanUpdate(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(text)
             env = base_env(tmp)
+            env["PYTHONUTF8"] = "1"  # v1.2.2 wrote with the locale encoding; it only ever ran on macOS
             out = subprocess.run([sys.executable, driver, old_path, new_path], env=env,
                                  capture_output=True, text=True, encoding="utf-8", timeout=60)
             self.assertEqual(out.returncode, 0, out.stderr)

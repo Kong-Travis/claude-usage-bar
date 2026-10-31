@@ -8,6 +8,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=${1:-$(mktemp -d)}
 mkdir -p "$WORK"
+chmod 755 "$WORK"  # the container user may have another uid than the host user (CI runners)
 FAILED=0
 step() { printf '\n########## %s\n' "$*"; }
 run() { "$@" || { echo "FAILED: $*"; FAILED=1; }; }
