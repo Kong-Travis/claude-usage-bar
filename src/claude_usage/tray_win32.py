@@ -405,6 +405,8 @@ class _Win32Api:
         bind(kernel32, "CloseHandle", wt.BOOL, wt.HANDLE)
 
         bind(user32, "SetProcessDPIAware", wt.BOOL)
+        bind(user32, "OpenDesktopW", wt.HANDLE, wt.LPCWSTR, wt.DWORD, wt.BOOL, wt.DWORD)
+        bind(user32, "SetThreadDesktop", wt.BOOL, wt.HANDLE)
         bind(user32, "RegisterClassW", wt.ATOM, P(self.WNDCLASSW))
         bind(user32, "UnregisterClassW", wt.BOOL, wt.LPCWSTR, wt.HINSTANCE)
         bind(user32, "CreateWindowExW", wt.HWND, wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD,
@@ -456,6 +458,12 @@ class _Win32Api:
     def create_window(self, on_message: Callable[[int, int, int], Optional[int]]):
         """A hidden top-level window (a message-only window would miss TaskbarCreated)."""
         ct, f = self._ct, self.fn
+        try:
+            h_desk = f.OpenDesktopW("Default", 0, False, 0x01FF)
+            if h_desk:
+                f.SetThreadDesktop(h_desk)
+        except Exception:
+            pass
         f.SetProcessDPIAware()  # crisp icon and menu on scaled displays
 
         def wndproc(hwnd, msg, wparam, lparam):
