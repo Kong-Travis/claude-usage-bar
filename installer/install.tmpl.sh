@@ -115,7 +115,7 @@ cat <<EOF
 $(printf '\033[1m%s\033[0m' "Xong.")
   Thanh menu hiện dạng "C 87/88/94  T 79/17/0": mỗi tài khoản là một chữ cái,
   ba số lần lượt là % giới hạn 5 giờ / tuần / Fable tuần. Bấm vào để xem
-  tên tài khoản và giờ reset. Tự cập nhật mỗi 3 phút, có bản mới thì menu
+  tên tài khoản và còn bao lâu nữa thì reset. Tự cập nhật mỗi 3 phút, có bản mới thì menu
   hiện nút "Cập nhật ngay". Nếu hiện "?", bấm vào để xem dòng "Lỗi: ..."
   hoặc xem file ~/.cache/claude-usage/last-run.log.
 

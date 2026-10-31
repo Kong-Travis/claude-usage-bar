@@ -7,7 +7,7 @@ C 87/88/94  T 79/17/0
 ```
 
 Each letter is one account. The numbers are: 5-hour limit % / weekly limit % / Fable weekly limit %.
-Orange at 70%, red at 90%. Click it to see account names and reset times.
+Orange at 70%, red at 90%. Click it to see account names and how long until each limit resets.
 
 ## Install
 

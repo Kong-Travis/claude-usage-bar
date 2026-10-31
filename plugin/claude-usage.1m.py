@@ -376,7 +376,20 @@ def color(pct):
 
 
 def fmt_reset(epoch):
-    return time.strftime("%H:%M %d/%m", time.localtime(epoch))
+    """Time left until the reset, e.g. "sau 2 giờ 15 phút". The menu is
+    redrawn every minute, so the countdown stays current between probes."""
+    mins = -(-(epoch - int(time.time())) // 60)  # round up: never "0 phút" early
+    if mins <= 0:
+        return "ngay bây giờ"
+    days, rest = divmod(mins, 1440)
+    hours, mins = divmod(rest, 60)
+    if days:
+        parts = [(days, "ngày"), (hours, "giờ")]
+    elif hours:
+        parts = [(hours, "giờ"), (mins, "phút")]
+    else:
+        parts = [(mins, "phút")]
+    return "sau " + " ".join("%d %s" % (n, u) for n, u in parts if n)
 
 
 def pcts(d):
