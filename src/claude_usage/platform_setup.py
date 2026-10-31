@@ -15,7 +15,7 @@ from .i18n import Translator, normalize_language
 from .infra import HttpClient, JsonCache, UrllibHttpClient
 from .scan import ShellScanner
 from .sources import (POSIX_RC_FILES, WINDOWS_RC_FILES, AccountRegistry, ConfigDirFinder,
-                      ConfTokenSource, CredentialsFileSource, EnvTokenSource, Keychain,
+                      ConfTokenSource, CredentialsFileSource, EnvTokenSource, FallbackSource, Keychain,
                       KeychainSource, ShellFiles, ShellTokenSource, UserConfig, is_posix_script,
                       is_windows_script, windows_registry_token)
 from .updater import ReleaseChecker, SelfUpdater
@@ -72,10 +72,12 @@ def build_sources(host: Host, config: UserConfig, clock: Clock, tr: Translator) 
 
     sources: List[AccountSource] = []
     if config.show_logins:
-        if host.os_name == MACOS:
-            sources.append(KeychainSource(Keychain()))
         dirs = ConfigDirFinder(host.home, host.env.get("CLAUDE_CONFIG_DIR"), scanner, files)
-        sources.append(CredentialsFileSource(dirs, clock, host.os_name == MACOS, tr))
+        cred_files = CredentialsFileSource(dirs, clock, host.os_name == MACOS, tr)
+        if host.os_name == MACOS:
+            sources.append(FallbackSource(KeychainSource(Keychain()), cred_files))
+        else:
+            sources.append(cred_files)
     sources += [ShellTokenSource(files, scanner), EnvTokenSource(env_readers),
                 ConfTokenSource(config)]
     return sources

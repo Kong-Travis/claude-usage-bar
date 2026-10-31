@@ -14,7 +14,7 @@ from claude_usage import platform_setup
 from claude_usage.infra import HttpResponse
 from claude_usage.platform_setup import (LINUX, MACOS, WINDOWS, Host, build, build_sources,
                                          detect_os)
-from claude_usage.sources import (ConfTokenSource, CredentialsFileSource, EnvTokenSource,
+from claude_usage.sources import (ConfTokenSource, CredentialsFileSource, EnvTokenSource, FallbackSource,
                                   KeychainSource, ShellTokenSource, UserConfig)
 
 P = "anthropic-ratelimit-unified-"
@@ -98,9 +98,12 @@ def kinds(sources):
 
 class BuildSourcesTest(TempHome):
     def test_macos_has_the_keychain_first(self):
-        self.assertEqual(kinds(self.sources(MACOS)),
-                         [KeychainSource, CredentialsFileSource, ShellTokenSource,
-                          EnvTokenSource, ConfTokenSource])
+        # The credentials file is only a fallback for an empty keychain on macOS.
+        sources = self.sources(MACOS)
+        self.assertEqual(kinds(sources), [FallbackSource, ShellTokenSource, EnvTokenSource,
+                                          ConfTokenSource])
+        self.assertIsInstance(sources[0]._primary, KeychainSource)
+        self.assertIsInstance(sources[0]._fallback, CredentialsFileSource)
 
     def test_linux_and_windows_have_no_keychain(self):
         for os_name in (LINUX, WINDOWS):
@@ -119,7 +122,9 @@ class BuildSourcesTest(TempHome):
         self.write(".claude/.credentials.json",
                    json.dumps({"claudeAiOauth": {"accessToken": "A", "expiresAt": expires_ms}}))
         clock = FakeClock(1000.0)
-        source = [s for s in self.sources(os_name, clock=clock) if isinstance(s, CredentialsFileSource)][0]
+        sources = [s._fallback if isinstance(s, FallbackSource) else s
+                   for s in self.sources(os_name, clock=clock)]
+        source = [s for s in sources if isinstance(s, CredentialsFileSource)][0]
         return [a.label for a in source.accounts()]
 
     def test_macos_hides_an_expired_credentials_file(self):

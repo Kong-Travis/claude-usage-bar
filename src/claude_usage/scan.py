@@ -32,6 +32,22 @@ def expand_path(path: str, home: str) -> str:
     return path
 
 
+def read_text(path: str, max_bytes: int = 0) -> str:
+    """A text file as str, whatever Windows tool wrote it: UTF-8 (with or without BOM) or
+    UTF-16 (what `>` and Out-File produce in Windows PowerShell 5.1). Undecodable bytes are
+    dropped. max_bytes > 0 skips larger files (returns "")."""
+    if max_bytes and os.path.getsize(path) > max_bytes:
+        return ""
+    with open(path, "rb") as f:
+        raw = f.read()
+    # UTF-16 text (mostly ASCII here) is about half NUL bytes; UTF-8 text has none.
+    if raw.count(b"\x00") * 3 > len(raw):
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return raw.decode("utf-16", errors="ignore")
+        return raw.decode("utf-16-le" if raw[1:2] == b"\x00" else "utf-16-be", errors="ignore")
+    return raw.decode("utf-8-sig", errors="ignore")
+
+
 def token_in_text(text: Optional[str]) -> Optional[str]:
     m = TOKEN_RE.search(text or "")
     return m.group(0) if m else None
@@ -39,8 +55,7 @@ def token_in_text(text: Optional[str]) -> Optional[str]:
 
 def read_token_file(path: str) -> Optional[str]:
     try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            return token_in_text(f.read())
+        return token_in_text(read_text(path))
     except OSError:
         return None
 
@@ -66,12 +81,10 @@ class ShellScanner:
 
     def lines(self, path: str) -> List[str]:
         try:
-            if os.path.getsize(path) > MAX_SCAN_BYTES:
-                return []
-            with open(path, encoding="utf-8", errors="ignore") as f:
-                return [ln for ln in f.read().splitlines() if not ln.lstrip().startswith(COMMENT_PREFIXES)]
+            text = read_text(path, MAX_SCAN_BYTES)
         except OSError:
             return []
+        return [ln for ln in text.splitlines() if not ln.lstrip().startswith(COMMENT_PREFIXES)]
 
     def tokens(self, path: str, default_label: str) -> List[Tuple[str, str]]:
         """(label, token) for every line that sets the token variable."""

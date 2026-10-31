@@ -70,6 +70,7 @@ class TrayController:
         self._open_url = open_url
         self._spawn = spawn or _start_daemon_thread
         self._busy = threading.Lock()
+        self._state = threading.Lock()  # guards _busy hand-over and _again together
         self._again = None  # None, or the force flag of a reload asked for while one ran
 
     def run(self) -> None:
@@ -84,9 +85,10 @@ class TrayController:
     def reload(self, force: bool = False) -> None:
         """Rebuild the menu in the background. If a rebuild is already running, run one more
         right after it, so a click (refresh, language) is never lost."""
-        if not self._busy.acquire(blocking=False):
-            self._again = bool(self._again) or force
-            return
+        with self._state:
+            if not self._busy.acquire(blocking=False):
+                self._again = bool(self._again) or force
+                return
 
         def work():
             try:
@@ -96,9 +98,10 @@ class TrayController:
             except Exception as e:  # keep the icon alive whatever happens
                 menu = error_menu(e, self._translator())
             finally:
-                self._busy.release()
+                with self._state:
+                    again, self._again = self._again, None
+                    self._busy.release()
             self._backend.call_soon(lambda: self._backend.show(menu))
-            again, self._again = self._again, None
             if again is not None:
                 self.reload(force=again)
 

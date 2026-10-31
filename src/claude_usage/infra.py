@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -61,12 +62,24 @@ class JsonCache:
         except (OSError, ValueError):
             return None
 
-    def save(self, name: str, data: Any) -> None:
-        os.makedirs(self.directory, exist_ok=True)
-        tmp = self.path(name) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, self.path(name))
+    def save(self, name: str, data: Any) -> bool:
+        """Best effort: a cache that cannot be written (full disk, a concurrent writer, a file
+        held open on Windows) must never break the menu. Returns False when nothing was saved."""
+        tmp = None
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=name + ".", suffix=".tmp", dir=self.directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.path(name))
+            return True
+        except OSError:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            return False
 
     def age(self, name: str) -> float:
         try:

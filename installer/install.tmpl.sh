@@ -222,7 +222,10 @@ cat > "$PLUGIN" <<'PLUGIN_EOF'
 __PLUGIN__
 PLUGIN_EOF
 chmod +x "$PLUGIN"
-[ "$LANG_CHOICE" = en ] && set_conf_language en
+# Vietnamese is the default: only rewrite the line if the file already sets a language.
+if [ "$LANG_CHOICE" = en ] || grep -q -E '^[[:space:]]*language[[:space:]]*=' "$CONF" 2>/dev/null; then
+  set_conf_language "$LANG_CHOICE"
+fi
 info "$(m installed) $PLUGIN"
 
 info "$(m test_run)"

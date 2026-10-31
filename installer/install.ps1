@@ -361,11 +361,15 @@ function Install-ClaudeUsage([string]$Base64) {
     if ($script:UiLang -eq 'en') {
         Set-ConfLanguage 'en'
         Info (M 'lang_saved' $ConfPath)
+    } elseif ((Test-Path -LiteralPath $ConfPath) -and
+              (Select-String -LiteralPath $ConfPath -Pattern '^\s*language\s*=' -Quiet)) {
+        Set-ConfLanguage 'vi'  # an earlier English install must not win over this choice
     }
+    # Stop the old tray first so it is not writing the cache while the test run does.
+    Stop-RunningTray
     Test-Plugin $python.Exe
 
     Say (M 'step3')
-    Stop-RunningTray
     New-StartupShortcut $pythonw
     Start-Tray $pythonw
 

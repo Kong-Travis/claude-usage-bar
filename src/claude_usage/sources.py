@@ -44,7 +44,7 @@ class UserConfig:
     def load(cls, path: str, home: str) -> UserConfig:
         token_files, show_logins, language = [], True, None
         try:
-            with open(path, encoding="utf-8", errors="ignore") as f:
+            with open(path, encoding="utf-8-sig", errors="ignore") as f:
                 lines = f.read().splitlines()
         except OSError:
             return cls()
@@ -66,7 +66,7 @@ def set_conf_value(path: str, key: str, value: str) -> None:
     """Set `key = value` in the conf file, replacing an existing line for key and keeping
     every other line (comments included)."""
     try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
+        with open(path, encoding="utf-8-sig", errors="ignore") as f:
             lines = f.read().splitlines()
     except OSError:
         lines = []
@@ -316,6 +316,25 @@ class ConfTokenSource:
             if token:
                 result.append(TokenAccount(label, token))
         return result
+
+
+class FallbackSource:
+    """The fallback's accounts only when the primary source finds none (or fails).
+
+    On macOS Claude Code writes .credentials.json only when it cannot write the keychain, so
+    the file is read only if the keychain has no login; otherwise one login could show twice.
+    """
+
+    def __init__(self, primary: AccountSource, fallback: AccountSource):
+        self._primary = primary
+        self._fallback = fallback
+
+    def accounts(self) -> List[Account]:
+        try:
+            found = self._primary.accounts()
+        except Exception:
+            found = []
+        return found or self._fallback.accounts()
 
 
 # ---------- registry ----------

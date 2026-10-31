@@ -292,6 +292,22 @@ def expand_path(path: str, home: str) -> str:
     return path
 
 
+def read_text(path: str, max_bytes: int = 0) -> str:
+    """A text file as str, whatever Windows tool wrote it: UTF-8 (with or without BOM) or
+    UTF-16 (what `>` and Out-File produce in Windows PowerShell 5.1). Undecodable bytes are
+    dropped. max_bytes > 0 skips larger files (returns "")."""
+    if max_bytes and os.path.getsize(path) > max_bytes:
+        return ""
+    with open(path, "rb") as f:
+        raw = f.read()
+    # UTF-16 text (mostly ASCII here) is about half NUL bytes; UTF-8 text has none.
+    if raw.count(b"\x00") * 3 > len(raw):
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return raw.decode("utf-16", errors="ignore")
+        return raw.decode("utf-16-le" if raw[1:2] == b"\x00" else "utf-16-be", errors="ignore")
+    return raw.decode("utf-8-sig", errors="ignore")
+
+
 def token_in_text(text: Optional[str]) -> Optional[str]:
     m = TOKEN_RE.search(text or "")
     return m.group(0) if m else None
@@ -299,8 +315,7 @@ def token_in_text(text: Optional[str]) -> Optional[str]:
 
 def read_token_file(path: str) -> Optional[str]:
     try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
-            return token_in_text(f.read())
+        return token_in_text(read_text(path))
     except OSError:
         return None
 
@@ -326,12 +341,10 @@ class ShellScanner:
 
     def lines(self, path: str) -> List[str]:
         try:
-            if os.path.getsize(path) > MAX_SCAN_BYTES:
-                return []
-            with open(path, encoding="utf-8", errors="ignore") as f:
-                return [ln for ln in f.read().splitlines() if not ln.lstrip().startswith(COMMENT_PREFIXES)]
+            text = read_text(path, MAX_SCAN_BYTES)
         except OSError:
             return []
+        return [ln for ln in text.splitlines() if not ln.lstrip().startswith(COMMENT_PREFIXES)]
 
     def tokens(self, path: str, default_label: str) -> List[Tuple[str, str]]:
         """(label, token) for every line that sets the token variable."""
@@ -407,7 +420,7 @@ class UserConfig:
     def load(cls, path: str, home: str) -> UserConfig:
         token_files, show_logins, language = [], True, None
         try:
-            with open(path, encoding="utf-8", errors="ignore") as f:
+            with open(path, encoding="utf-8-sig", errors="ignore") as f:
                 lines = f.read().splitlines()
         except OSError:
             return cls()
@@ -429,7 +442,7 @@ def set_conf_value(path: str, key: str, value: str) -> None:
     """Set `key = value` in the conf file, replacing an existing line for key and keeping
     every other line (comments included)."""
     try:
-        with open(path, encoding="utf-8", errors="ignore") as f:
+        with open(path, encoding="utf-8-sig", errors="ignore") as f:
             lines = f.read().splitlines()
     except OSError:
         lines = []
@@ -681,6 +694,25 @@ class ConfTokenSource:
         return result
 
 
+class FallbackSource:
+    """The fallback's accounts only when the primary source finds none (or fails).
+
+    On macOS Claude Code writes .credentials.json only when it cannot write the keychain, so
+    the file is read only if the keychain has no login; otherwise one login could show twice.
+    """
+
+    def __init__(self, primary: AccountSource, fallback: AccountSource):
+        self._primary = primary
+        self._fallback = fallback
+
+    def accounts(self) -> List[Account]:
+        try:
+            found = self._primary.accounts()
+        except Exception:
+            found = []
+        return found or self._fallback.accounts()
+
+
 # ---------- registry ----------
 
 class AccountRegistry:
@@ -711,6 +743,7 @@ class AccountRegistry:
 
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -767,12 +800,24 @@ class JsonCache:
         except (OSError, ValueError):
             return None
 
-    def save(self, name: str, data: Any) -> None:
-        os.makedirs(self.directory, exist_ok=True)
-        tmp = self.path(name) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, self.path(name))
+    def save(self, name: str, data: Any) -> bool:
+        """Best effort: a cache that cannot be written (full disk, a concurrent writer, a file
+        held open on Windows) must never break the menu. Returns False when nothing was saved."""
+        tmp = None
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=name + ".", suffix=".tmp", dir=self.directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.path(name))
+            return True
+        except OSError:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            return False
 
     def age(self, name: str) -> float:
         try:
@@ -1324,10 +1369,12 @@ def build_sources(host: Host, config: UserConfig, clock: Clock, tr: Translator) 
 
     sources: List[AccountSource] = []
     if config.show_logins:
-        if host.os_name == MACOS:
-            sources.append(KeychainSource(Keychain()))
         dirs = ConfigDirFinder(host.home, host.env.get("CLAUDE_CONFIG_DIR"), scanner, files)
-        sources.append(CredentialsFileSource(dirs, clock, host.os_name == MACOS, tr))
+        cred_files = CredentialsFileSource(dirs, clock, host.os_name == MACOS, tr)
+        if host.os_name == MACOS:
+            sources.append(FallbackSource(KeychainSource(Keychain()), cred_files))
+        else:
+            sources.append(cred_files)
     sources += [ShellTokenSource(files, scanner), EnvTokenSource(env_readers),
                 ConfTokenSource(config)]
     return sources
@@ -1435,6 +1482,7 @@ class TrayController:
         self._open_url = open_url
         self._spawn = spawn or _start_daemon_thread
         self._busy = threading.Lock()
+        self._state = threading.Lock()  # guards _busy hand-over and _again together
         self._again = None  # None, or the force flag of a reload asked for while one ran
 
     def run(self) -> None:
@@ -1449,9 +1497,10 @@ class TrayController:
     def reload(self, force: bool = False) -> None:
         """Rebuild the menu in the background. If a rebuild is already running, run one more
         right after it, so a click (refresh, language) is never lost."""
-        if not self._busy.acquire(blocking=False):
-            self._again = bool(self._again) or force
-            return
+        with self._state:
+            if not self._busy.acquire(blocking=False):
+                self._again = bool(self._again) or force
+                return
 
         def work():
             try:
@@ -1461,9 +1510,10 @@ class TrayController:
             except Exception as e:  # keep the icon alive whatever happens
                 menu = error_menu(e, self._translator())
             finally:
-                self._busy.release()
+                with self._state:
+                    again, self._again = self._again, None
+                    self._busy.release()
             self._backend.call_soon(lambda: self._backend.show(menu))
-            again, self._again = self._again, None
             if again is not None:
                 self.reload(force=again)
 

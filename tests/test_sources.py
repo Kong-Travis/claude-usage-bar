@@ -369,3 +369,62 @@ class RegistryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRegressions(unittest.TestCase):
+    """Cases found in review: Windows file encodings, cache write failures, fallback logins."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def path(self, name, data: bytes):
+        p = os.path.join(self.dir, name)
+        with open(p, "wb") as f:
+            f.write(data)
+        return p
+
+    def test_token_file_written_by_powershell_51_is_read(self):
+        from claude_usage.scan import read_token_file
+        token = "sk-ant-oat01-PS51"
+        self.assertEqual(read_token_file(self.path("t1", (token + "\r\n").encode("utf-16"))), token)
+        self.assertEqual(read_token_file(self.path("t2", token.encode("utf-16-le"))), token)
+
+    def test_conf_saved_with_a_bom_keeps_its_first_line(self):
+        p = self.path("c.conf", b"\xef\xbb\xbfkeychain = off\nlanguage = en\n")
+        conf = UserConfig.load(p, self.dir)
+        self.assertEqual((conf.show_logins, conf.language, conf.token_files), (False, "en", ()))
+
+    def test_a_cache_that_cannot_be_written_does_not_raise(self):
+        from claude_usage.infra import JsonCache
+        blocker = self.path("not-a-dir", b"")
+        cache = JsonCache(os.path.join(blocker, "sub"), FakeClockForReview())
+        self.assertFalse(cache.save("x", {"a": 1}))
+        ok = JsonCache(self.dir, FakeClockForReview())
+        self.assertTrue(ok.save("x", {"a": 1}))
+        self.assertEqual(ok.load("x"), {"a": 1})
+        self.assertEqual([n for n in os.listdir(self.dir) if n.endswith(".tmp")], [])
+
+    def test_fallback_source_is_used_only_when_the_primary_finds_nothing(self):
+        from claude_usage.sources import FallbackSource
+
+        class Fixed:
+            def __init__(self, accounts=None, error=None):
+                self._accounts, self._error = accounts or [], error
+
+            def accounts(self):
+                if self._error:
+                    raise self._error
+                return list(self._accounts)
+
+        a, b = TokenAccount("a", "sk-ant-oat01-A"), TokenAccount("b", "sk-ant-oat01-B")
+        self.assertEqual(FallbackSource(Fixed([a]), Fixed([b])).accounts(), [a])
+        self.assertEqual(FallbackSource(Fixed([]), Fixed([b])).accounts(), [b])
+        self.assertEqual(FallbackSource(Fixed(error=OSError("locked")), Fixed([b])).accounts(), [b])
+
+
+class FakeClockForReview:
+    def now(self):
+        return 1000.0
