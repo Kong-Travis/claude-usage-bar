@@ -188,8 +188,14 @@ class Footer(unittest.TestCase):
         menu = presenter().present([row("C", usage())], None)
         by_text = {i.text: i for i in menu.items}
         self.assertEqual(by_text["Phiên bản v1.2.2"].action.url, REPO_URL)
-        self.assertEqual(by_text["Ủng hộ tác giả"].action.url, REPO_URL + "#support")
+        self.assertNotIn("Ủng hộ tác giả", by_text)
         self.assertEqual(menu.items[-1].action.kind, REFRESH)
+
+    def test_support_item_only_when_enabled(self):
+        p = Presenter(FakeClock(), Translator("vi"), "1.2.2", REPO_URL, 70, 90, 3,
+                      show_support=True)
+        by_text = {i.text: i for i in p.present([row("C", usage())], None).items}
+        self.assertEqual(by_text["Ủng hộ tác giả"].action.url, REPO_URL + "#support")
 
     def test_language_item_offers_the_other_language(self):
         vi = presenter("vi").present([row("C", usage())], None)

@@ -68,15 +68,6 @@ distribution.
 - Linux: delete `~/.config/argos/claude-usage.1m.py` (Argos), or run `pkill -f "claude-usage.py --tray"` and delete `~/.local/share/claude-usage` and
   `~/.config/autostart/claude-usage.desktop`.
 
-## Support
-
-Free for everyone. If it saves you some time, you can buy me a coffee by scanning this VietQR code
-with any Vietnamese banking app:
-
-<img src="docs/donate-qr.png" alt="VietQR: BIDV 2890271697 TRINH VAN CONG" width="280">
-
-BIDV - 2890271697 - TRINH VAN CONG (the transfer note "Ung ho claude-usage-bar" is pre-filled)
-
 ## Development
 
 The code lives in `src/claude_usage/` (Python 3.9, standard library only):

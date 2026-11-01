@@ -19,6 +19,8 @@ PROBE_MODELS = ("claude-fable-5-1", "claude-haiku-5-5")
 # Per-model weekly windows seen in the headers, by suffix of "7d_<suffix>".
 MODEL_WINDOWS = {"oi": "Fable"}
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+# The "Support the author" menu item, off until the new donation account is ready.
+SHOW_SUPPORT = False
 
 
 @dataclass(frozen=True)

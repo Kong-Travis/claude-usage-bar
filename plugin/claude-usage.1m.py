@@ -155,6 +155,8 @@ PROBE_MODELS = ("claude-fable-5-1", "claude-haiku-5-5")
 # Per-model weekly windows seen in the headers, by suffix of "7d_<suffix>".
 MODEL_WINDOWS = {"oi": "Fable"}
 KEYCHAIN_SERVICE = "Claude Code-credentials"
+# The "Support the author" menu item, off until the new donation account is ready.
+SHOW_SUPPORT = False
 
 
 @dataclass(frozen=True)
@@ -1112,8 +1114,9 @@ def short_name(label: str, taken: Set[str]) -> str:
 
 class Presenter:
     def __init__(self, clock: Clock, tr: Translator, version: str, repo_url: str, warn: float,
-                 crit: float, max_in_title: int):
+                 crit: float, max_in_title: int, show_support: bool = False):
         self._clock = clock
+        self._show_support = show_support
         self._tr = tr
         self._version = version
         self._repo_url = repo_url
@@ -1188,7 +1191,10 @@ class Presenter:
             MenuItem(tr("number_order"), color=GRAY, size=11),
             MenuItem(tr("version", version=self._version), color=GRAY, size=11,
                      action=Action(OPEN, self._repo_url)),
-            MenuItem(tr("support"), action=Action(OPEN, self._repo_url + "#support")),
+        ]
+        if self._show_support:
+            items.append(MenuItem(tr("support"), action=Action(OPEN, self._repo_url + "#support")))
+        items += [
             self.language_item(),
             MenuItem(tr("refresh_now"), action=Action(REFRESH)),
         ]
@@ -1401,7 +1407,8 @@ def build(host: Host, clock: Clock = None, http: HttpClient = None) -> Services:
                            PROBE_EVERY),
         identity=IdentityService(ProfileClient(http, endpoints.api), cache, EMAIL_EVERY),
         releases=releases,
-        presenter=Presenter(clock, tr, VERSION, REPO_URL, WARN_PCT, CRIT_PCT, MAX_IN_TITLE),
+        presenter=Presenter(clock, tr, VERSION, REPO_URL, WARN_PCT, CRIT_PCT, MAX_IN_TITLE,
+                            SHOW_SUPPORT),
         run_log=RunLog(host.cache_dir, clock, VERSION),
         version=VERSION,
     )
